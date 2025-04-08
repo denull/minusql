@@ -344,8 +344,8 @@ console.log(users[0].greet()); // "Hello, John!"
 ```
 
 The Query object provides these mapping methods:
-- `toArray(value?)`: Returns results as an array, optionally transforming each row using the field parameter
 - `one(value?)`: Returns the first result or null if none found, optionally transformed
+- `toArray(value?)`: Returns results as an array, optionally transforming each row using the field parameter
 - `toObject(key, value?)`: Maps results to an object using the specified key, optionally transforming values
 - `toObjectArray(key, value?)`: Groups results into arrays by key
 - `toMap(key, value?)`: Maps results to a Map
@@ -362,7 +362,7 @@ The transformation parameter (`value`) can be:
 
 `key` parameter supports a subset of those types:
 - A **string**: property to be used as key
-- A **function**: called with `(row, index, allRows)`
+- A **function**: called with `(row, index, allRows)` and result is used as key
 - An **array**: elements will be joined with `_` and used as key
 
 Note that by default, all result keys are automatically converted from snake_case to camelCase unless `convertCase: false` was set.
