@@ -540,6 +540,9 @@ class SQL {
     }
     return new Promise(async (resolve, reject) => {
       const convertResults = (results) => {
+        if (!Array.isArray(results)) { // MySQL behavior is a bit inconsistent with everythin else
+          return [results];
+        }
         if (!this.$config.convertCase) {
           return results;
         }
