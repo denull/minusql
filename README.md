@@ -5,6 +5,7 @@ MinuSQL (pronounced _minuscule_) is a lightweight, flexible SQL query builder an
 ## Features
 
 - Support for both MySQL and PostgreSQL
+- No dependencies
 - Fluent query builder interface
 - Automatic case conversion (snake_case ↔ camelCase)
 - Parameterized queries for security
@@ -165,26 +166,14 @@ await db.users.insert([
   { name: 'Jane', age: 25 }
 ]);
 
-// Upsert (PostgreSQL)
 await db.users.insert(
   { id: 888352, name: 'John', age: 30, revision: 0 },
   {
-    unique: ['id'],
+    unique: ['id'], // Only for PostgreSQL
     conflict: {
       name: /update/, // Update name on conflict
       age: /fill/,    // Update age only if null
       revision: ['+', Symbol('revision'), 1], // Expressions are supported here as well
-    }
-  }
-);
-
-// MySQL upsert (ON DUPLICATE KEY UPDATE)
-await db.users.insert(
-  { id: 1, name: 'John', age: 30 },
-  {
-    conflict: {
-      name: /update/,
-      age: /fill/
     }
   }
 );
@@ -394,6 +383,30 @@ await db.begin(async (tx) => {
   // If all succeed, it will be committed automatically
 });
 ```
+
+### JOIN Operations
+
+```javascript
+const results = await db.join([
+  { table: 'users', as: 'u' },
+  { table: 'profiles', as: 'p', on: { 'u.id': Symbol('p.userId') } },
+]).selectAll();
+
+// Same as
+const results = await db.users
+  .join('profiles p', { 'users.id': Symbol('p.userId') })
+  .selectAll();
+```
+
+To join multiple tables, call `db.join` with the array of objects containing following fields:
+- `table`: name of the table or another subquery
+- `as` (Optional): alias to be used in `AS` clause
+- `join` (Optional): join type to be used in `JOIN` clause (if omitted, defaults to `LEFT`)
+- `on`: any expression in the structured format to be used in `ON` clause
+
+Instead of object with join description, you can also use raw string, but it's discouraged.
+
+Alternatively, you can call `join` directly on a table: `db.users.join({ table: 'profiles', ... })`. As a shorthand, you can also pass table name as the first argument and join condition as second.
 
 ## Contributing
 

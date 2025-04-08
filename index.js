@@ -75,9 +75,6 @@ function isPostgres(sql) {
 function maybeSnakeCase(sql, k) {
   return sql.$config.convertCase ? toSnakeCase(k) : k;
 }
-function maybeCamelCase(sql, k) {
-  return sql.$config.convertCase ? toCamelCase(k) : k;
-}
 
 class Query {
   constructor(sql, text, params = []) {
@@ -99,8 +96,7 @@ class Query {
         const keys = Object.keys(row);
         return field.fromRow ? field.fromRow(row) : Object.create(
           field.prototype,
-          Object.fromEntries(keys.map(k => [
-            maybeCamelCase(this.sql, k),
+          Object.fromEntries(keys.map(k => [k,
             { value: row[k], enumerable: true, writable: true }
           ]))
         );
@@ -111,21 +107,14 @@ class Query {
       return field.map(f => this.mapFn(f, row, index, rows));
     }
     if (typeof field === 'string') {
-      return row[maybeSnakeCase(this.sql, field)];
+      return row[field];
     }
     if (typeof field === 'object') {
       const keys = Object.keys(field);
       return Object.fromEntries(
-        keys.map(k => [
-          maybeCamelCase(this.sql, k),
+        keys.map(k => [k,
           this.mapFn(field[k], row, index, rows)
         ])
-      );
-    }
-    if (this.sql.$config.convertCase) {
-      const keys = Object.keys(row);
-      return Object.fromEntries(
-        keys.map(k => [toCamelCase(k), row[k]])
       );
     }
     return row;
@@ -200,7 +189,7 @@ class Query {
 
   async toArray(field) {
     const rows = await this.sql.exec(this);
-    if (!field && !this.sql.$config.convertCase) {
+    if (!field) {
       return rows;
     }
     return rows.map((row, i) => this.mapFn(field, row, i, rows));
@@ -216,7 +205,7 @@ class Query {
     if (!rows[0]) {
       return null;
     }
-    if (!field && !this.sql.$config.convertCase) {
+    if (!field) {
       return rows[0];
     }
     return this.mapFn(field, rows[0], 0, rows);
@@ -246,7 +235,7 @@ class Tables {
   id(name) {
     if (name === '*') return '*';
     name = maybeSnakeCase(this.sql, name);
-    return isMySQL(this.sql) ? `\`${name}\`` : `"${name}"`; 
+    return name.split('.').map(id => isMySQL(this.sql) ? `\`${id}\`` : `"${id}"`).join('.'); 
   }
 
   value(value, params, inVar = false) {
@@ -272,7 +261,7 @@ class Tables {
       return isPostgres(this.sql) ? `$${params.length}${t ? `::${t}` : ''}` : '?';
     }
     switch (typeof value) {
-      case 'symbol': return value.description.split('.').map(id => this.id(id)).join('.');
+      case 'symbol': return this.id(value.description);
       case 'boolean': return isPostgres(this.sql) ? (value ? `'t'` : `'f'`) : (value ? 'true' : 'false');
       case 'number': return value + '';
       case 'string': return isPostgres(this.sql) ? escapePostgresString(value) : escapeMysqlString(value);
@@ -550,19 +539,25 @@ class SQL {
       query = query.text;
     }
     return new Promise(async (resolve, reject) => {
+      const convertResults = (results) => {
+        if (!this.$config.convertCase) {
+          return results;
+        }
+        return results.map(row => Object.fromEntries(Object.keys(row).map(k => [toCamelCase(k), row[k]])));
+      }
       switch (this.$config.flavor) {
         case 'mysql': 
           this.$db.query(query, params, (error, results, fields) => {
             if (error) {
               reject(error);
             } else {
-              resolve(results);
+              resolve(convertResults(results));
             }
           });
           break;
         case 'postgres':
           const results = (await this.$db.query(query, params)).rows;
-          resolve(results);
+          resolve(convertResults(results));
           break;
       }
     });
