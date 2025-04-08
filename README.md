@@ -192,7 +192,7 @@ Supported options:
 - `fields`: an array of columns; if omitted, the first element's keys will be used
 - `unique` (PostgreSQL only): for upserts, you need to specify a list of unique fields
 - `conflict`: for upserts, describes the conflict resolution strategy (see below)
-- `returnId` (PostgreSQL only): which column to return after insertion (set to `true` to return column "id")
+- `returnId` (PostgreSQL only): which column to return after insertion (set to `true` to return column "id"). MySQL will always return id of the inserted row (along with some other information) as a `insertId` field in the resulting row.
 
 Conflict resolution strategy is either `false` (ignore all conflicts) or an object. Its keys correspond to columns that should be updated on conflict, and values are structured expressions to set them to.
 
