@@ -136,7 +136,7 @@ Structured condition is defined as a recursive expression:
 
 There are a few special behaviors for specific SQL operators:
 - `['in', Symbol('x'), [1, 2, 3]]` is converted to `"x" IN (1, 2, 3)`
-- `['notIn', Symbol('x'), [1, 2, 3]]` is converted to `"x" NOT IN (1, 2, 3)`
+- `['not in', Symbol('x'), [1, 2, 3]]` is converted to `"x" NOT IN (1, 2, 3)`
 - `['cast', Symbol('x'), 'json']` is converted to `"x"::json`
 - `['case', [cond1, then1], [cond2, then2], [default]]` is converted to `CASE WHEN cond1 THEN then1 WHEN cond2 THEN then2 ELSE default END`
 

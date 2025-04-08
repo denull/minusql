@@ -272,21 +272,22 @@ class Tables {
   expr(e, ps) {
     // Two variants: array (['func', ...args]) and object ({ field: value, ... })
     if (Array.isArray(e) && !isVar(e)) {
-      const fn = e.shift();
+      const fn = e.shift().toUpperCase();
   
       // Operators
-      if (['+', '-', '*', '/', '&', '|', 'and', 'or', 'xor', '=', '!=', '<>', '>', '>=', '<', '<='].includes(fn)) {
+      if (['+', '-', '*', '/', '&', '|', 'AND', 'OR', 'XOR', '=', '!=', '<>', '>', '>=', '<', '<='].includes(fn)) {
         return `(${e.map(e => this.expr(e, ps)).join(` ${fn} `)})`;
       }
   
       switch (fn) {
-        case 'in':
-        case 'notIn':
+        case 'IN':
+        case 'NOTIN':
+        case 'NOT IN':
           const list = isVar(e[1]) ? this.value(e[1], ps) : e[1].map(e => this.expr(e, ps)).join(',');
-          return `${this.expr(e[0], ps)}${fn === 'notIn' ? ' NOT' : ''} IN (${list})`;
-        case 'not':  return `NOT ${this.expr(e[0], ps)}`;
-        case 'cast': return `${this.expr(e[0], ps)}::${e[1]}`;
-        case 'case': return `CASE ${
+          return `${this.expr(e[0], ps)}${fn === 'IN' ? '' : ' NOT'} IN (${list})`;
+        case 'NOT':  return `NOT ${this.expr(e[0], ps)}`;
+        case 'CAST': return `${this.expr(e[0], ps)}::${e[1]}`;
+        case 'CASE': return `CASE ${
           e.map((cond, i, e) =>
             cond.length > 1 ?
               `WHEN ${this.expr(cond[0], ps)} THEN ${this.expr(cond[1], ps)}` :
