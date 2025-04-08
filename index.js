@@ -62,15 +62,8 @@ function escapePostgresString(val) { // From pg-format
   return quoted;
 }
 
-class Var {
-  constructor(value, type) {
-    this.value = value;
-    this.type = type;
-  }
-}
-
 function isVar(v) {
-  return v instanceof Var;
+  return v && typeof v === 'object' && '$' in v;
 }
 
 class Query {
@@ -239,7 +232,7 @@ class Tables {
       if (!params) {
         throw new Error('Parameters not supported here');
       }
-      let v = inVar ? value : value.value;
+      let v = inVar ? value : value.$;
       let t = inVar ? false : value.type;
       if (Array.isArray(v)) {
         return v.map(el => this.value(el, params, true)).join(',');
@@ -577,8 +570,6 @@ class SQL {
   }
 }
 
-SQL.prototype.Var = Var;
-
 SQL.Postgres = class extends SQL {
   constructor(db, params = {}) {
     super(db, { flavor: 'postgres', ...params });
@@ -590,7 +581,5 @@ SQL.MySQL = class extends SQL {
     super(db, { flavor: 'mysql', ...params });
   }
 }
-
-SQL.Var = (value, type) => new Var(value, type);
 
 module.exports = SQL;
