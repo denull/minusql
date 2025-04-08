@@ -344,26 +344,26 @@ console.log(users[0].greet()); // "Hello, John!"
 ```
 
 The Query object provides these mapping methods:
-- `toArray(field?)`: Returns results as an array, optionally transforming each row using the field parameter
-- `one(field?)`: Returns the first result or null if none found, optionally transformed
+- `toArray(value?)`: Returns results as an array, optionally transforming each row using the field parameter
+- `one(value?)`: Returns the first result or null if none found, optionally transformed
 - `toObject(key, value?)`: Maps results to an object using the specified key, optionally transforming values
 - `toObjectArray(key, value?)`: Groups results into arrays by key
 - `toMap(key, value?)`: Maps results to a Map
 - `toMapArray(key, value?)`: Groups results into arrays in a Map by key
-- `toSet(field)`: Extracts unique values from the specified field into a Set
+- `toSet(value)`: Extracts unique values from the specified field into a Set
 - `forEach(fn)`: Executes a function for each result row
 
-The transformation parameter (`field`) can be:
-- A string: extracts that property from each row
-- A function: called with `(row, index, allRows)` for custom transformations
-- A class: tries to instantiate objects from rows, using `fromRow()` static method if available
-- An object: for extracting/transforming multiple properties (recursively)
-- An array: for extracting multiple properties as an array (recursively)
+The transformation parameter (`value`) can be:
+- A **string**: extracts that property from each row
+- A **function**: called with `(row, index, allRows)` for custom transformations
+- A **class**: tries to instantiate objects from rows, using `fromRow()` static method if available
+- An **object**: for extracting/transforming multiple properties (recursively)
+- An **array**: for extracting multiple properties as an array (recursively)
 
 `key` parameter supports a subset of those types:
-- A string: property to be used as key
-- A function: called with `(row, index, allRows)`
-- An array: elements will be joined with `_` and used as key
+- A **string**: property to be used as key
+- A **function**: called with `(row, index, allRows)`
+- An **array**: elements will be joined with `_` and used as key
 
 Note that by default, all result keys are automatically converted from snake_case to camelCase unless `convertCase: false` was set.
 

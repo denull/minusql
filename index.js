@@ -135,8 +135,7 @@ class Query {
     const rows = await this.sql.exec(this);
     const obj = {};
     for (let i = 0; i < rows.length; i++) {
-      const k = typeof key === 'function' ?
-        key(rows[i], i, rows) :
+      const k = typeof key === 'function' ? key(rows[i], i, rows) :
         (Array.isArray(key) ? key.map(k => row[k]).join('_') : rows[i][key]);
       (obj[k] ||= []).push(this.mapFn(value, rows[i], i, rows));
     }
@@ -167,8 +166,7 @@ class Query {
     const rows = await this.sql.exec(this);
     const map = new Map();
     for (let i = 0; i < rows.length; i++) {
-      const k = typeof key === 'function' ?
-        key(rows[i], i, rows) :
+      const k = typeof key === 'function' ? key(rows[i], i, rows) :
         (Array.isArray(key) ? key.map(k => row[k]).join('_') : rows[i][key]);
       if (!map.has(k)) {
         map.set(k, []);
@@ -178,21 +176,21 @@ class Query {
     return map;
   }
 
-  async toSet(field) {
+  async toSet(value) {
     const rows = await this.sql.exec(this);
     const set = new Set();
     for (let i = 0; i < rows.length; i++) {
-      map.add(this.mapFn(field, rows[i], i, rows));
+      set.add(this.mapFn(value, rows[i], i, rows));
     }
-    return map;
+    return set;
   }
 
-  async toArray(field) {
+  async toArray(value) {
     const rows = await this.sql.exec(this);
-    if (!field) {
+    if (!value) {
       return rows;
     }
-    return rows.map((row, i) => this.mapFn(field, row, i, rows));
+    return rows.map((row, i) => this.mapFn(value, row, i, rows));
   }
 
   async forEach(fn) {
@@ -200,15 +198,15 @@ class Query {
     rows.forEach(fn);
   }
   
-  async one(field) {
+  async one(value) {
     const rows = await this.sql.exec(this);
     if (!rows[0]) {
       return null;
     }
-    if (!field) {
+    if (!value) {
       return rows[0];
     }
-    return this.mapFn(field, rows[0], 0, rows);
+    return this.mapFn(value, rows[0], 0, rows);
   }
 
   then(onFullfilled, onRejected) {
