@@ -85,10 +85,9 @@ To perform CRUD operations on a table, use one of the following methods:
 
 All of these methods return a `Query` object, which will be executed as soon as you `await` it (or call `exec()` on it). You can also use the Query object to inspect the built query (the `text` field) or call `explain()` to construct an EXPLAIN query from it.
 
-There are also a few convenient aliases for common select types:
+There are also two convenient aliases for common select types:
 - `selectAll(options?)` is equivalent to `select(null, options)`
 - `selectOne(where?, options?)` is equivalent to `select(where, options).one()`
-- `selectMany(where?, options?)` is equivalent to `select(where, options).toArray()`
 
 #### SELECT Queries
 

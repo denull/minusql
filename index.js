@@ -398,10 +398,6 @@ class Tables {
     return this.select(where, opts).one();
   }
 
-  selectMany(where, opts = {}) {
-    return this.select(where, opts).toArray();
-  }
-
   update(update, where) {
     if (typeof update !== 'string') {
       update = Object.keys(update).map(key => `${
