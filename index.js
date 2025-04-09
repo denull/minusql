@@ -224,6 +224,28 @@ class Query {
   }
 }
 
+const MaybeUnaryOperators = [
+  '-', '~', '#', '@@', '@-@', '?-', '!!', ':', '|/', '||/', '@', '%',
+];
+const BinaryOperators = [
+  '=', '!=', '<>', '>', '>=', '<', '<=', // Comparison
+  '>>', '<<', '%', 'MOD', 'DIV', // Arithmetic
+  'LIKE', 'NOT LIKE', 'ILIKE', 'NOT ILIKE', 'SIMILAR TO', 'NOT SIMILAR TO', // Pattern-matching
+  'REGEXP', 'RLIKE', 'NOT REGEXP', 'NOT RLIKE', 'SOUNDS LIKE', // MySQL RegExps & Soundex
+  '~~', '!~~', '~', '~*', '!~', '!~*', // Postgres patterns and RegExps
+  '->', '->>', '#>', '#>>', '@>', '<@', '?', '?|', '?&', '#-', // Postgres JSON operators
+  '@@', '&&', '<->', // Postgres full-text search operators
+  '#', '@-@', '@@', '##', '<^', '>^', '?#', '?-', '?-|', '?||', // Postgres geometry
+  '&&&', '&<', '&<|', '&>', '<<|', '@', '|&>', '|>>', '~=', '|=|', '<#>', '<<->>', // PostGIS operators
+  '<%', '%>', '<<%', '%>>', '<<->', '<->>', '<<<->', '<->>>', // Postgres trigram operators
+  'OVERLAPS', '>>=', '<<=', '!!=', '-|-', // Misc Postgres operators
+];
+const Operators = [
+  ...BinaryOperators,
+  '+', '-', '*', '/', '&', '|', '^',
+  'AND', 'OR', 'XOR',
+  '||', // Postgres concatenation
+];
 class Tables {
   constructor(sql, list) {
     this.sql = sql;
@@ -271,9 +293,18 @@ class Tables {
     // Two variants: array (['func', ...args]) and object ({ field: value, ... })
     if (Array.isArray(e) && !isVar(e)) {
       const fn = e.shift().toUpperCase();
+      function checkArity(n) {
+        if (e.length != n) throw new Error(`"${fn}" requires exactly ${n} operands (${e.length} supplied)`);
+      }
   
       // Operators
-      if (['+', '-', '*', '/', '&', '|', 'AND', 'OR', 'XOR', '=', '!=', '<>', '>', '>=', '<', '<='].includes(fn)) {
+      if (MaybeUnaryOperators.includes(fn) && (e.length === 1)) {
+        return `${fn} ${this.expr(e[0], ps)}`;
+      }
+      if (Operators.includes(fn)) {
+        if (BinaryOperators.includes(fn)) {
+          checkArity(2);
+        }
         return `(${e.map(e => this.expr(e, ps)).join(` ${fn} `)})`;
       }
   
@@ -281,11 +312,28 @@ class Tables {
         case 'IN':
         case 'NOTIN':
         case 'NOT IN':
+          checkArity(2);
           const list = isVar(e[1]) ? this.value(e[1], ps) : e[1].map(e => this.expr(e, ps)).join(',');
           return `${this.expr(e[0], ps)}${fn === 'IN' ? '' : ' NOT'} IN (${list})`;
-        case 'NOT':  return `NOT ${this.expr(e[0], ps)}`;
-        case 'CAST': return `${this.expr(e[0], ps)}::${e[1]}`;
-        case 'CASE': return `CASE ${
+        case 'IS NULL':
+        case 'IS NOT NULL':
+          checkArity(1);
+          return `${this.expr(e[0], ps)} ${fn}`;
+        case 'NOT':
+          checkArity(1);
+          return `${fn} ${this.expr(e[0], ps)}`;
+        case 'BETWEEN':
+        case 'NOT BETWEEN':
+          checkArity(3);
+          return `${this.expr(e[0], ps)} ${fn} ${this.expr(e[1], ps)} AND ${this.expr(e[2], ps)}`;
+        case 'CAST':
+          checkArity(2);
+          return isPostgres(this.sql) ? `${this.expr(e[0], ps)}::${e[1]}` : `CAST(${this.expr(e[0], ps)} AS ${e[1]})`;
+        case 'EXTRACT':
+          checkArity(2);
+          return `EXTRACT ${e[1]} FROM ${this.expr(e[0], ps)}`;
+        case 'CASE':
+          return `CASE ${
           e.map((cond, i, e) =>
             cond.length > 1 ?
               `WHEN ${this.expr(cond[0], ps)} THEN ${this.expr(cond[1], ps)}` :
