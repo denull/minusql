@@ -72,9 +72,6 @@ function isMySQL(sql) {
 function isPostgres(sql) {
   return sql.$config.flavor === 'postgres';
 }
-function maybeSnakeCase(sql, k) {
-  return sql.$config.convertCase ? toSnakeCase(k) : k;
-}
 
 class Query {
   constructor(sql, text, params = []) {
@@ -246,16 +243,19 @@ const Operators = [
   'AND', 'OR', 'XOR',
   '||', // Postgres concatenation
 ];
-class Tables {
-  constructor(sql, list) {
+
+class Builder {
+  constructor(sql) {
     this.sql = sql;
-    this.list = Array.isArray(list) ? list : (list ? [list] : []);
+  }
+
+  tableCase(name) {
+    return this.sql.$config.convertCase ? toSnakeCase(name) : name;
   }
 
   id(name) {
     if (name === '*') return '*';
-    name = maybeSnakeCase(this.sql, name);
-    return name.split('.').map(id => isMySQL(this.sql) ? `\`${id}\`` : `"${id}"`).join('.'); 
+    return this.tableCase(name).split('.').map(id => isMySQL(this.sql) ? `\`${id}\`` : `"${id}"`).join('.'); 
   }
 
   value(value, params, inVar = false) {
@@ -353,7 +353,7 @@ class Tables {
     if (e && typeof e === 'object' && !isVar(e)) {
       return Object.keys(e).map(k => {
         const v = e[k];
-        const field = maybeSnakeCase(this.sql, k);
+        const field = this.tableCase(k);
         if (Array.isArray(v)) {
           return this.expr([v[0], Symbol(field), ...v.slice(1)], ps);
         } else
@@ -368,6 +368,21 @@ class Tables {
     return this.value(e, ps);
   }
 
+  table(tables, params) {
+    return tables.map((t, i) => {
+      if (typeof t === 'string') {
+        return `${i > 0 ? 'LEFT JOIN ' : ''}${this.tableCase(t)}`;
+      }
+      return `${i > 0 ? (t.join || 'LEFT') + ' JOIN ' : ''}${
+        typeof t.table === 'string' ? this.tableCase(t.table) : `(${t.table})`
+      }${
+        t.as ? ' AS ' + t.as : ''
+      }${
+        t.on ? ' ON ' + this.where(t.on) : ''
+      }`;
+    }).join(' ');
+  }
+
   fields(fields, params) {
     if (typeof fields === 'string') {
       return fields;
@@ -376,7 +391,7 @@ class Tables {
       return this.sql.$config.convertCase ? fields.map(toSnakeCase).join(',') : fields.join(',');
     }
     return Object.keys(fields).map(field => {
-      const id = maybeSnakeCase(this.sql, field);
+      const id = this.tableCase(field);
       return (fields[field] === true) ? id : `${this.expr(fields[field], params)} AS ${id}`;
     }).join(',');
   }
@@ -408,45 +423,25 @@ class Tables {
     return this.expr(e, params);
   }
 
-  join(other, on) {
-    if (on) {
-      this.list.push({ table: other, on });
-    } else
-    if (Array.isArray(other)) {
-      this.list.push(...other);
-    } else {
-      this.list.push(other);
+  updates(updates, params) {
+    if (typeof updates === 'string') {
+      return updates;
     }
-    return this;
+    return Object.keys(updates).map(key => `${
+      this.tableCase(key)
+    }=${
+      this.expr(updates[key], params)
+    }`).join(',');
   }
 
-  toString() {
-    let tables = '';
-    for (const t of this.list) {
-      if (typeof t === 'string') {
-        tables += `${tables !== '' ? ' LEFT JOIN ' : ''}${maybeSnakeCase(this.sql, t)}`;
-      } else {
-        tables += `${tables !== '' ? ' ' + (t.join || 'LEFT') + ' JOIN ' : ''}${
-          typeof t.table === 'string' ? maybeSnakeCase(this.sql, t.table) : `(${t.table})`
-        }${
-          t.as ? ' AS ' + t.as : ''
-        }${
-          t.on ? ' ON ' + this.where(t.on) : ''
-        }`;
-      }
-    }
-    return tables;
-  }
-
-  select(where, { fields = '*', distinct, group, having, order = '', limit, offset } = {}) {
+  select(table, where, { fields = '*', distinct, group, having, order = '', limit, offset } = {}) {
     const params = [];
-    const table = this.toString();
     return new Query(this.sql, `SELECT ${
       distinct ? 'DISTINCT' + (distinct === true ? '' : ' ON (' + this.exprs(distinct, params) + ')') + ' ' : ''
     }${
       this.fields(fields, params)
     }${
-      table ? ' FROM ' + table : ''
+      table ? ' FROM ' + this.table(table, params) : ''
     }${
       where ? ' WHERE ' + this.where(where, params) : ''
     }${
@@ -462,33 +457,18 @@ class Tables {
     }`, params);
   }
 
-  selectAll(opts = {}) {
-    return this.select(null, opts);
-  }
-
-  selectOne(where, opts = {}) {
-    return this.select(where, opts).one();
-  }
-
-  update(update, where) {
+  update(table, updates, where) {
     const params = [];
-    if (typeof update !== 'string') {
-      update = Object.keys(update).map(key => `${
-        maybeSnakeCase(this.sql, key)
-      }=${
-        this.expr(update[key], params)
-      }`).join(',');
-    }
     return new Query(this.sql, `UPDATE ${
-      this.toString()
+      this.table(table, params)
     } SET ${
-      update
+      this.updates(updates, params)
     }${
       where ? ' WHERE ' + this.where(where, params) : ''
     }`, params);
   }
 
-  insert(values, { fields, unique, conflict, returnId } = {}) {
+  insert(table, values, { fields, unique, conflict, returnId } = {}) {
     if (!Array.isArray(values)) {
       values = [values];
     }
@@ -567,7 +547,7 @@ class Tables {
       `INSERT${
         conflict === false && isMySQL(this.sql) ? ' IGNORE' : ''
       } INTO ${
-        this.toString()
+        this.table(table, params)
       } (${
         fields.map(field => this.id(field)).join(',')
       }) VALUES ${
@@ -579,10 +559,60 @@ class Tables {
       }`, params);
   }
 
-  delete(where) {
+  delete(table, where) {
     const params = [];
-    where = where && this.where(where, params);
-    return new Query(this.sql, `DELETE FROM ${this.toString()}${where ? ' WHERE ' + where : ''}`, params);
+    return new Query(this.sql, `DELETE FROM ${
+      this.table(table, params)
+    }${
+      where ? ' WHERE ' + this.where(where, params) : ''
+    }`, params);
+  }
+}
+
+class Tables {
+  constructor(sql, list) {
+    this.sql = sql;
+    this.list = Array.isArray(list) ? list : (list ? [list] : []);
+  }
+
+  join(other, on) {
+    if (on) {
+      this.list.push({ table: other, on });
+    } else
+    if (Array.isArray(other)) {
+      this.list.push(...other);
+    } else {
+      this.list.push(other);
+    }
+    return this;
+  }
+
+  toString() {
+    return this.sql.$builder.table(this.list);
+  }
+
+  selectAll(options = {}) {
+    return this.sql.$builder.select(this.list, null, options);
+  }
+
+  selectOne(where, options = {}) {
+    return this.sql.$builder.select(this.list, where, options).one();
+  }
+
+  select(where, options = {}) {
+    return this.sql.$builder.select(this.list, where, options);
+  }
+
+  update(update, where) {
+    return this.sql.$builder.update(this.list, update, where);
+  }
+
+  insert(rows, options = {}) {
+    return this.sql.$builder.insert(this.list, rows, options);
+  }
+
+  delete(where) {
+    return this.sql.$builder.delete(this.list, where);
   }
 }
 
@@ -595,12 +625,13 @@ class SQL {
     if (this.$config.convertCase === undefined) {
       this.$config.convertCase = true;
     }
+    this.$builder = new Builder(this);
     return new Proxy(this, {
       get(target, prop) {
         if (prop in target) {
           return target[prop];
         }
-        return new Tables(target, maybeSnakeCase(target, prop));
+        return new Tables(target, target.$builder.tableCase(prop));
       }
     });
   }
@@ -613,7 +644,7 @@ class SQL {
     }
     return new Promise(async (resolve, reject) => {
       const convertResults = (results) => {
-        if (!Array.isArray(results)) { // MySQL behavior is a bit inconsistent with everythin else
+        if (!Array.isArray(results)) { // MySQL behavior is a bit inconsistent with everything else
           return [results];
         }
         if (!this.$config.convertCase) {
@@ -641,7 +672,7 @@ class SQL {
 
   // Alternative to simply accessing db.tableName
   from(table) {
-    return new Tables(this, maybeSnakeCase(this, table));
+    return new Tables(this, this.$builder.tableCase(table));
   }
 
   // Join multiple tables
