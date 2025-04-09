@@ -441,7 +441,7 @@ class Builder {
     }${
       this.fields(fields, params)
     }${
-      table ? ' FROM ' + this.table(table, params) : ''
+      table.length ? ' FROM ' + this.table(table, params) : ''
     }${
       where ? ' WHERE ' + this.where(where, params) : ''
     }${
