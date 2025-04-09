@@ -469,6 +469,8 @@ class Builder {
   }
 
   insert(table, values, { fields, unique, conflict, returnId } = {}) {
+    const params = [];
+    table = this.table(table, params);
     if (!Array.isArray(values)) {
       values = [values];
     }
@@ -492,13 +494,13 @@ class Builder {
         if (value instanceof RegExp) {
           switch (value.source.toLowerCase()) {
             case 'update': updates.push(`${field} = ${exclId}`); break;
-            case 'fill':   updates.push(`${field} = COALESCE(${this}.${field}, ${exclId})`); break;
-            case 'inc':    updates.push(`${field} = ${this}.${field} + 1`); break;
-            case 'dec':    updates.push(`${field} = ${this}.${field} - 1`); break;
-            case 'add':    updates.push(`${field} = ${this}.${field} + ${exclId}`); break;
-            case 'sub':    updates.push(`${field} = ${this}.${field} - ${exclId}`); break;
-            case 'max':    updates.push(`${field} = GREATEST(${this}.${field}, ${exclId})`); break;
-            case 'min':    updates.push(`${field} = LEAST(${this}.${field}, ${exclId})`); break;
+            case 'fill':   updates.push(`${field} = COALESCE(${table}.${field}, ${exclId})`); break;
+            case 'inc':    updates.push(`${field} = ${table}.${field} + 1`); break;
+            case 'dec':    updates.push(`${field} = ${table}.${field} - 1`); break;
+            case 'add':    updates.push(`${field} = ${table}.${field} + ${exclId}`); break;
+            case 'sub':    updates.push(`${field} = ${table}.${field} - ${exclId}`); break;
+            case 'max':    updates.push(`${field} = GREATEST(${table}.${field}, ${exclId})`); break;
+            case 'min':    updates.push(`${field} = LEAST(${table}.${field}, ${exclId})`); break;
             default: throw new Error(`Unknown conflict rule: ${value.source}`);
           }
         } else {
@@ -507,7 +509,6 @@ class Builder {
       }
     }
   
-    const params = [];
     const rows = [];
     for (const v of values) {
       const row = [];
@@ -547,7 +548,7 @@ class Builder {
       `INSERT${
         conflict === false && isMySQL(this.sql) ? ' IGNORE' : ''
       } INTO ${
-        this.table(table, params)
+        table
       } (${
         fields.map(field => this.id(field)).join(',')
       }) VALUES ${
