@@ -1,9 +1,9 @@
 function toCamelCase(k) {
-  return k.split('_').map((word, i) => i > 0 ? word[0].toUpperCase() + word.substring(1) : word).join('');
+  return k ? (k + '').split('_').map((word, i) => i > 0 ? word[0].toUpperCase() + word.substring(1) : word).join('') : k;
 }
 
 function toSnakeCase(k) {
-  return k.replace(/(([a-z])(?=[A-Z]([a-zA-Z]|$))|([A-Z])(?=[A-Z][a-z]))/g,'$1_').toLowerCase();
+  return k ? (k + '').replace(/(([a-z])(?=[A-Z]([a-zA-Z]|$))|([A-Z])(?=[A-Z][a-z]))/g,'$1_').toLowerCase() : k;
 }
 
 
@@ -249,7 +249,7 @@ const Operators = [
 class Tables {
   constructor(sql, list) {
     this.sql = sql;
-    this.list = Array.isArray(list) ? list : [list];
+    this.list = Array.isArray(list) ? list : (list ? [list] : []);
   }
 
   id(name) {
@@ -368,11 +368,44 @@ class Tables {
     return this.value(e, ps);
   }
 
+  fields(fields, params) {
+    if (typeof fields === 'string') {
+      return fields;
+    }
+    if (Array.isArray(fields)) {
+      return this.sql.$config.convertCase ? fields.map(toSnakeCase).join(',') : fields.join(',');
+    }
+    return Object.keys(fields).map(field => {
+      const id = maybeSnakeCase(this.sql, field);
+      return (fields[field] === true) ? id : `${this.expr(fields[field], params)} AS ${id}`;
+    }).join(',');
+  }
+
   where(where, params) {
     if (!where) {
       return '';
     }
     return this.expr(where, params);
+  }
+
+  exprs(exprs, params) {
+    if (typeof exprs === 'string') {
+      return exprs;
+    }
+    if (Array.isArray(exprs)) {
+      return exprs.map(e => typeof e === 'string' ? e : this.expr(e, params)).join(',');
+    }
+    return this.expr(e, params);
+  }
+
+  order(exprs, params) {
+    if (typeof exprs === 'string') {
+      return exprs;
+    }
+    if (Array.isArray(exprs)) {
+      return exprs.map(e => typeof e === 'string' ? e : `${this.expr(e[0], params)}${e[1] ? ' ' + e[1] : ''}`).join(',');
+    }
+    return this.expr(e, params);
   }
 
   join(other, on) {
@@ -405,35 +438,27 @@ class Tables {
     return tables;
   }
 
-  select(where, { fields = '*', group, having, order = '', limit, offset } = {}) {
-    if (typeof fields !== 'string') {
-      if (Array.isArray(fields)) {
-        fields = this.sql.$config.convertCase ? fields.map(toSnakeCase).join(',') : fields.join(',');
-      } else {
-        fields = Object.keys(fields).map(field => {
-          const id = maybeSnakeCase(this.sql, field);
-          return (fields[field] === true) ? id : `${this.expr(fields[field])} AS ${id}`;
-        }).join(',');
-      }
-    }
+  select(where, { fields = '*', distinct, group, having, order = '', limit, offset } = {}) {
     const params = [];
-    order = order && Array.isArray(order) ? order.join(',') : order;
-    where = where && this.where(where, params);
-    having = having && this.where(having, params);
-    return new Query(this.sql, `SELECT ${fields} FROM ${
-      this.toString()
+    const table = this.toString();
+    return new Query(this.sql, `SELECT ${
+      distinct ? 'DISTINCT' + (distinct === true ? '' : ' ON (' + this.exprs(distinct, params) + ')') + ' ' : ''
     }${
-      where ? ' WHERE ' + where : ''
+      this.fields(fields, params)
     }${
-      group ? ' GROUP BY ' + group : ''
+      table ? ' FROM ' + table : ''
     }${
-      having ? ' HAVING ' + having : ''
+      where ? ' WHERE ' + this.where(where, params) : ''
     }${
-      order ? ' ORDER BY ' + order : ''
+      group ? ' GROUP BY ' + this.exprs(group, params) : ''
     }${
-      limit ? ' LIMIT ' + limit : ''
+      having ? ' HAVING ' + this.where(having, params) : ''
     }${
-      offset ? ' OFFSET ' + offset : ''
+      order ? ' ORDER BY ' + this.order(order, params) : ''
+    }${
+      limit ? ' LIMIT ' + this.value(limit, params) : ''
+    }${
+      offset ? ' OFFSET ' + this.value(offset, params) : ''
     }`, params);
   }
 
@@ -446,16 +471,21 @@ class Tables {
   }
 
   update(update, where) {
+    const params = [];
     if (typeof update !== 'string') {
       update = Object.keys(update).map(key => `${
         maybeSnakeCase(this.sql, key)
       }=${
-        this.expr(update[key])
+        this.expr(update[key], params)
       }`).join(',');
     }
-    const params = [];
-    where = where && this.where(where, params);
-    return new Query(this.sql, `UPDATE ${this.toString()} SET ${update}${where ? ' WHERE ' + where : ''}`, params);
+    return new Query(this.sql, `UPDATE ${
+      this.toString()
+    } SET ${
+      update
+    }${
+      where ? ' WHERE ' + this.where(where, params) : ''
+    }`, params);
   }
 
   insert(values, { fields, unique, conflict, returnId } = {}) {
