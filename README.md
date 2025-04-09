@@ -153,36 +153,49 @@ By default, the resulting query returns an array of rows. To re-map it to more s
 #### INSERT Queries
 
 ```javascript
-// Single insert
+// Single insert without parameters (not recommended)
 await db.users.insert({
   name: 'John',
   age: 30
 });
 
-// Batch insert
-await db.users.insert([
-  { name: 'John', age: 30 },
-  { name: 'Jane', age: 25 }
-]);
-
-await db.users.insert(
-  { id: 888352, name: 'John', age: 30, revision: 0 },
-  {
-    unique: ['id'], // Only for PostgreSQL
-    conflict: {
-      name: /update/, // Update name on conflict
-      age: /fill/,    // Update age only if null
-      revision: ['+', Symbol('revision'), 1], // Expressions are supported here as well
-    }
-  }
-);
-
-// Return inserted ID (PostgreSQL only)
-const result = await db.users.insert(
-  { name: 'John', age: 30 },
-  { returnId: true }
+// Using parameters and returning inserted ID
+const userName = 'John';
+const userAge = 30;
+const result = await db.users.insert({
+    name: {$: userName},
+    age:  {$: userAge},
+  },
+  { returnId: true } // (PostgreSQL only, MySQL will always add insertId to output)
 );
 // result will contain the ID of the inserted row
+
+// Batch insert with parameters
+await db.users.insert(usersToInsert.map(user => ({
+  name: {$: user.name},
+  age:  {$: user.age},
+})));
+
+// Upsert (handling conflicts)
+await db.users.insert({
+  id:         {$: 888352},
+  name:       {$: 'John'},
+  age:        {$: 30},
+  revision:   {$: 0},
+  joinedAt:   {
+    $: Date.now() / 1000,
+    type: 'timestamp', // Unixtime can be easily converted to timestamps
+  },
+}, {
+  unique: ['id'], // Needed only for PostgreSQL (upserts on MySQL will work without it)
+  conflict: {
+    name:     /update/, // Update name on conflict
+    age:      /max/,    // Update to largest of old and new value
+    revision: ['+', Symbol('revision'), 1], // Expressions are supported here as well
+    joinedAt: /fill/,   // Update only if was null
+  },
+});
+
 ```
 
 `insert` accepts two parameters: rows to insert (or a single row) and options.
