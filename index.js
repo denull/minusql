@@ -331,7 +331,7 @@ class Builder {
           return isPostgres(this.sql) ? `${this.expr(e[0], ps)}::${e[1]}` : `CAST(${this.expr(e[0], ps)} AS ${e[1]})`;
         case 'EXTRACT':
           checkArity(2);
-          return `EXTRACT ${e[1]} FROM ${this.expr(e[0], ps)}`;
+          return `EXTRACT(${e[1]} FROM ${this.expr(e[0], ps)})`;
         case 'CASE':
           return `CASE ${
           e.map((cond, i, e) =>
