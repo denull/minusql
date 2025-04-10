@@ -514,15 +514,39 @@ class Builder {
     return this.expr(e, params);
   }
 
-  updates(updates, params) {
+  updates(updates, transform, params) {
     if (typeof updates === 'string') {
       return updates;
     }
-    return Object.keys(updates).map(key => `${
-      this.tableCase(key)
-    }=${
-      this.expr(updates[key], params)
-    }`).join(',');
+    return Object.keys(updates).map(key => {
+      if (typeof transform === 'function') {
+        return `${this.id(key)}=${this.expr(transform(key, updates), params)}`;
+      }
+      
+      const value = updates[key];
+      if (transform === false) { // do not wrap any values at all
+        return `${this.id(key)}=${this.expr(value, params)}`;
+      } else
+      if (typeof transform === 'object') {
+        if (transform[key] === false) { // false = do not wrap (as a parameter)
+          return `${this.id(key)}=${this.expr(value, params)}`;;
+        } else
+        if (typeof transform[key] === 'string') { // string = wrap with type
+          if (value && typeof value === 'object' && '$' in value) { // already wrapped, add type
+            return `${this.id(key)}=${this.expr(Object.assign({}, value, {type: transform[key]}), params)}`;
+          }
+          return `${this.id(key)}=${this.expr({$: value, type: transform[key]}, params)}`;
+        } else
+        if (typeof transform[key] === 'function') { // function = wrapper function
+          return `${this.id(key)}=${this.expr(transform[key](value, updates), params)}`;
+        }
+      }
+
+      if (value && typeof value === 'object' && '$' in value) { // Already wrapped
+        return `${this.id(key)}=${this.expr(value, params)}`;
+      }
+      return `${this.id(key)}=${this.expr({$: value}, params)}`;
+    }).join(',');
   }
 
   rows(rows, fields, transform, params) {
@@ -628,12 +652,12 @@ class Builder {
     }`, params);
   }
 
-  update(table, updates, where) {
+  update(table, updates, where, { transform } = {}) {
     const params = [];
     return new Query(this.sql, `UPDATE ${
       this.table(table, params)
     } SET ${
-      this.updates(updates, params)
+      this.updates(updates, transform, params)
     }${
       where ? ' WHERE ' + this.where(where, params) : ''
     }`, params);
@@ -729,8 +753,8 @@ class Tables {
     return this.sql.$builder.select(this.list, where, options);
   }
 
-  update(update, where) {
-    return this.sql.$builder.update(this.list, update, where);
+  update(update, where, options = {}) {
+    return this.sql.$builder.update(this.list, update, where, options);
   }
 
   insert(rows, options = {}) {
