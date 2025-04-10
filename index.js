@@ -278,6 +278,9 @@ class Builder {
       if (Array.isArray(v)) {
         return v.map(el => this.value(el, params, true)).join(',');
       }
+      if (v instanceof RegExp) {
+        v = this.regexp(v, true).pattern;
+      }
       if (value.type === 'unixtime') {
         params.push(v instanceof Date ? v.getTime() / 1000 : (typeof v === 'string' && v.toUpperCase() === 'NOW' ? Date.now() / 1000 : v));
         return `${isPostgres(this.sql) ? 'TO_TIMESTAMP' : 'FROM_UNIXTIME'}($${params.length})`;
@@ -290,7 +293,62 @@ class Builder {
       case 'boolean': return isPostgres(this.sql) ? (value ? `'t'` : `'f'`) : (value ? 'true' : 'false');
       case 'number': return value + '';
       case 'string': return isPostgres(this.sql) ? escapePostgresString(value) : escapeMysqlString(value);
-      default: throw new Error(`Unsupported type: ${typeof value}, ${JSON.stringify(value)}`);
+      default:
+        if (value instanceof RegExp) {
+          const { pattern } = this.regexp(value, true);
+          return isPostgres(this.sql) ? escapePostgresString(pattern) : escapeMysqlString(pattern);
+        }
+        throw new Error(`Unsupported type: ${typeof value}, ${JSON.stringify(value)}`);
+    }
+  }
+
+  regexp({ source, flags }, forceRegExp) {
+    const isCaseSensitive = !flags.includes('i');
+    let pattern;
+    if (!forceRegExp) {
+      pattern = source
+        .replace(/^\^/, '').replace(/\$$/, '')
+        .replace(/%/g, '\\%').replace(/_/g, '\\_')
+        .replace(/\.\*/g, '%').replace(/\./g, '_');
+      
+      if (!source.startsWith('^') && !pattern.startsWith('%')) {
+        pattern = '%' + pattern;
+      }
+      if (!source.endsWith('$') && (!pattern.endsWith('%') || pattern.endsWith('\\%'))) {
+        pattern = pattern + '%';
+      }
+
+      const isComplex = 
+        /[\^\$\(\)\[\]\{\}\?\+\*\|]/.test(pattern) || // Special RegExp chars
+        /\\[dDsSwWbB]/.test(source) || // Character classes
+        /\(\?[=!:]/.test(source);      // Lookahead/lookbehind
+      if (!isComplex) {
+        return {
+          pattern,
+          transform: (lhs, params, inVar) =>
+            isCaseSensitive ? `${this.id(lhs)} LIKE ${this.value(pattern, params, inVar)}` :
+              (isPostgres(this.sql) ? `${this.id(lhs)} ILIKE ${this.value(pattern, params, inVar)}` :
+                `LOWER(${this.id(lhs)}) LIKE ${this.value(pattern.toLowerCase(), params, inVar)}`),
+        }
+      }
+    }
+
+    pattern = source;
+    if (isPostgres(this.sql)) {
+      pattern = pattern
+        .replace(/\\b/g, '\\y');
+
+      return {
+        pattern,
+        transform: (lhs, params, inVar) =>
+          `${this.id(lhs)} ${isCaseSensitive ? '~' : '~*'} ${this.value(pattern, params, inVar)}`,
+      }
+    }
+
+    return {
+      pattern,
+      transform: (lhs, params, inVar) =>
+        `${this.id(lhs)} REGEXP ${this.value(pattern, params, inVar)}${isCaseSensitive ? '' : ' COLLATE utf8_general_ci'}`,
     }
   }
   
@@ -361,7 +419,7 @@ class Builder {
       }
     }
 
-    if (e && typeof e === 'object' && !isVar(e)) {
+    if (e && typeof e === 'object' && !isVar(e) && !(e instanceof RegExp)) {
       return Object.keys(e).map(k => {
         const v = e[k];
         const field = this.tableCase(k);
@@ -370,6 +428,12 @@ class Builder {
         } else
         if (v === null) {
           return `${this.id(field)} IS NULL`;
+        } else
+        if (v instanceof RegExp) {
+          return this.regexp(v).transform(field, ps);
+        } else
+        if (v && typeof v === 'object' && '$' in v && v.$ instanceof RegExp) {
+          return this.regexp(v.$).transform(field, ps, true);
         } else {
           return `${this.id(field)} = ${this.value(v, ps)}`;
         }
