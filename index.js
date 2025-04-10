@@ -235,7 +235,7 @@ const BinaryOperators = [
   '#', '@-@', '@@', '##', '<^', '>^', '?#', '?-', '?-|', '?||', // Postgres geometry
   '&&&', '&<', '&<|', '&>', '<<|', '@', '|&>', '|>>', '~=', '|=|', '<#>', '<<->>', // PostGIS operators
   '<%', '%>', '<<%', '%>>', '<<->', '<->>', '<<<->', '<->>>', // Postgres trigram operators
-  'OVERLAPS', '>>=', '<<=', '!!=', '-|-', // Misc Postgres operators
+  'AT TIME ZONE', 'OVERLAPS', '>>=', '<<=', '!!=', '-|-', // Misc Postgres operators
 ];
 const Operators = [
   ...BinaryOperators,
@@ -256,6 +256,13 @@ class Builder {
   id(name) {
     if (name === '*') return '*';
     return this.tableCase(name).split('.').map(id => isMySQL(this.sql) ? `\`${id}\`` : `"${id}"`).join('.'); 
+  }
+
+  keyword(name) {
+    if (/^[A-Za-z ]+/.match(name)) {
+      throw new Error(`Keyword expected here, got "${name}" instead`);
+    }
+    return name;
   }
 
   value(value, params, inVar = false) {
@@ -292,6 +299,9 @@ class Builder {
   expr(e, ps) {
     // Two variants: array (['func', ...args]) and object ({ field: value, ... })
     if (Array.isArray(e) && !isVar(e)) {
+      if (typeof e[0] !== 'string') {
+        throw new Error(`First element of array-style expression must a function/operator name, got "${e[0]}" instead`);
+      }
       const fn = e.shift().toUpperCase();
       function checkArity(n) {
         if (e.length != n) throw new Error(`"${fn}" requires exactly ${n} operands (${e.length} supplied)`);
@@ -326,9 +336,12 @@ class Builder {
         case 'NOT BETWEEN':
           checkArity(3);
           return `${this.expr(e[0], ps)} ${fn} ${this.expr(e[1], ps)} AND ${this.expr(e[2], ps)}`;
+        case 'TYPE':
+          checkArity(2);
+          return `${this.keyword(e[1])} ${this.expr(e[0], ps)}`;
         case 'CAST':
           checkArity(2);
-          return isPostgres(this.sql) ? `${this.expr(e[0], ps)}::${e[1]}` : `CAST(${this.expr(e[0], ps)} AS ${e[1]})`;
+          return isPostgres(this.sql) ? `${this.expr(e[0], ps)}::${e[1]}` : `CAST(${this.expr(e[0], ps)} AS ${this.keyword(e[1])})`;
         case 'EXTRACT':
           checkArity(2);
           return `EXTRACT(${e[1]} FROM ${this.expr(e[0], ps)})`;
@@ -434,6 +447,82 @@ class Builder {
     }`).join(',');
   }
 
+  rows(rows, fields, transform, params) {
+    if (typeof rows === 'number') {
+      rows = Array(rows);
+    } else
+    if (!Array.isArray(rows) && typeof rows !== 'function') {
+      rows = [rows];
+    }
+    const result = [];
+    for (const v of rows) {
+      if (!fields) {
+        fields = Object.keys(v);
+      }
+      result.push('(' + fields.map(key => {
+        if (typeof transform === 'function') {
+          return this.value(transform(key, v, result.length, rows), params);
+        }
+        
+        const value = v[key];
+        if (transform === false) { // do not wrap any values at all
+          return this.expr(value, params);
+        } else
+        if (typeof transform === 'object') {
+          if (transform[key] === false) { // false = do not wrap (as a parameter)
+            return this.expr(value, params);
+          } else
+          if (typeof transform[key] === 'string') { // string = wrap with type
+            if (value && typeof value === 'object' && '$' in value) { // already wrapped, add type
+              return this.expr(Object.assign({}, value, {type: transform[key]}), params);
+            }
+            return this.expr({$: value, type: transform[key]}, params);
+          } else
+          if (typeof transform[key] === 'function') { // function = wrapper function
+            return this.expr(transform[key](value, v, result.length, rows), params);
+          }
+        }
+
+        if (value && typeof value === 'object' && '$' in value) { // Already wrapped
+          return this.expr(value, params);
+        }
+        return this.expr({$: value}, params);
+      }).join(',') + ')');
+    }
+    return [
+      result.join(','),
+      fields.map(field => this.id(field)).join(','),
+    ];
+  }
+
+  conflict(conflict, table, params) {
+    if (typeof conflict === 'string' || !conflict) {
+      return conflict;
+    }
+    return Object.keys(conflict).map((key) => {
+      const field = this.id(key);
+      const value = conflict[key];
+      const exclId = isPostgres(this.sql) ?
+        `EXCLUDED.${field}` : 
+        `VALUES(${field})`;
+      if (value instanceof RegExp) {
+        switch (value.source.toLowerCase()) {
+          case 'update': return `${field} = ${exclId}`;
+          case 'fill':   return `${field} = COALESCE(${table}.${field}, ${exclId})`;
+          case 'inc':    return `${field} = ${table}.${field} + 1`;
+          case 'dec':    return `${field} = ${table}.${field} - 1`;
+          case 'add':    return `${field} = ${table}.${field} + ${exclId}`;
+          case 'sub':    return `${field} = ${table}.${field} - ${exclId}`;
+          case 'max':    return `${field} = GREATEST(${table}.${field}, ${exclId})`;
+          case 'min':    return `${field} = LEAST(${table}.${field}, ${exclId})`;
+          default: throw new Error(`Unknown conflict rule: ${value.source}`);
+        }
+      } else {
+        return `${field} = ${this.expr(value, params)}`;
+      }
+    }).join(',');
+  }
+
   select(table, where, { fields = '*', distinct, group, having, order = '', limit, offset } = {}) {
     const params = [];
     return new Query(this.sql, `SELECT ${
@@ -468,61 +557,20 @@ class Builder {
     }`, params);
   }
 
-  insert(table, values, { fields, unique, conflict, returnId } = {}) {
-    const params = [];
-    table = this.table(table, params);
-    if (!Array.isArray(values)) {
-      values = [values];
-    }
-
-    if (values.length == 0) {
-      return;
-    }
-
-    if (!fields) {
-      fields = Object.keys(values[0]);
-    }
-
-    const updates = [];
-    if (conflict) {
-      for (const key in conflict) {
-        const field = this.id(key);
-        const value = conflict[key];
-        const exclId = isPostgres(this.sql) ?
-          `EXCLUDED.${field}` : 
-          `VALUES(${field})`;
-        if (value instanceof RegExp) {
-          switch (value.source.toLowerCase()) {
-            case 'update': updates.push(`${field} = ${exclId}`); break;
-            case 'fill':   updates.push(`${field} = COALESCE(${table}.${field}, ${exclId})`); break;
-            case 'inc':    updates.push(`${field} = ${table}.${field} + 1`); break;
-            case 'dec':    updates.push(`${field} = ${table}.${field} - 1`); break;
-            case 'add':    updates.push(`${field} = ${table}.${field} + ${exclId}`); break;
-            case 'sub':    updates.push(`${field} = ${table}.${field} - ${exclId}`); break;
-            case 'max':    updates.push(`${field} = GREATEST(${table}.${field}, ${exclId})`); break;
-            case 'min':    updates.push(`${field} = LEAST(${table}.${field}, ${exclId})`); break;
-            default: throw new Error(`Unknown conflict rule: ${value.source}`);
-          }
-        } else {
-          updates.push(`${field} = ${this.expr(value)}`);
-        }
-      }
-    }
-  
-    const rows = [];
-    for (const v of values) {
-      const row = [];
-      for (const key of fields) {
-        row.push(this.value(v[key], params));
-      }
-      rows.push('(' + row.join(',') + ')');
-    }
-
+  insert(table, rows, { fields, transform, unique, conflict, returnId } = {}) {
     if (unique && conflict === undefined) {
       throw new Error(`"conflict" should be either false (to ignore conflicts) or an update object when "unique" is set`);
     }
     if (!unique && conflict !== undefined && isPostgres(this.sql)) {
       throw new Error(`Specifying "conflict" on Postgres requires also specifying "unique" fields (constraints)`);
+    }
+
+    const params = [];
+    table = this.table(table, params);
+
+    [rows, fields] = this.rows(rows, fields, transform, params);
+    if (rows.length == 0) {
+      return;
     }
 
     if (unique && Array.isArray(unique)) {
@@ -531,13 +579,13 @@ class Builder {
 
     if (isMySQL(this.sql)) {
       if (conflict) {
-        conflict = ` ON DUPLICATE KEY UPDATE ${updates.join(',')}`;
+        conflict = ` ON DUPLICATE KEY UPDATE ${this.conflict(conflict, table, params)}`;
       }
     } else
     if (isPostgres(this.sql)) {
       if (unique) {
         if (conflict) {
-          conflict = ` ON CONFLICT (${unique}) DO UPDATE SET ${updates.join(',')}`;
+          conflict = ` ON CONFLICT (${unique}) DO UPDATE SET ${this.conflict(conflict, table, params)}`;
         } else {
           conflict = ` ON CONFLICT (${unique}) DO NOTHING`;
         }
@@ -546,13 +594,13 @@ class Builder {
   
     return new Query(this.sql,
       `INSERT${
-        conflict === false && isMySQL(this.sql) ? ' IGNORE' : ''
+        conflict === false ? ' IGNORE' : ''
       } INTO ${
         table
       } (${
-        fields.map(field => this.id(field)).join(',')
+        fields
       }) VALUES ${
-        rows.join(',')
+        rows
       }${
         conflict || ''
       }${
@@ -617,8 +665,9 @@ class Tables {
   }
 }
 
-class SQL {
+class SQL extends Function {
   constructor(db, config = {}) {
+    super();
     // Dollar-signs are used instead of "_" to designate private fields
     // This is to minimise risks of collisions with SQL table names (where _ is allowed as first character, but $ is not)
     this.$db = db;
@@ -633,7 +682,17 @@ class SQL {
           return target[prop];
         }
         return new Tables(target, target.$builder.tableCase(prop));
-      }
+      },
+      apply(target, thisArg, argumentsList) {
+        const params = [];
+        return new Query(target, argumentsList[0].map((chunk, i, chunks) => {
+          if (i === chunks.length - 1) {
+            return chunk;
+          }
+          params.push(argumentsList[i + 1]);
+          return chunk + '$' + (i + 1);
+        }).join(''), params);
+      },
     });
   }
 
