@@ -117,7 +117,7 @@ const results = await db.users
 // With ordering and limits
 const results = await db.users
   .select(null, { 
-    order: 'createdAt DESC',
+    order: 'createdAt DESC', // or [[Symbol('createdAt'), 'DESC']]
     limit: 10,
     offset: 0
   });
@@ -139,15 +139,16 @@ There are a few special behaviors for specific SQL operators:
 - `['not in', Symbol('x'), [1, 2, 3]]` is converted to `"x" NOT IN (1, 2, 3)`
 - `['between', Symbol('x'), 1, 2]` is converted to `"x" BETWEEN 1 AND 2`
 - `['not between', Symbol('x'), 1, 2]` is converted to `"x" NOT BETWEEN 1 AND 2`
+- `['type', Symbol('x'), 'json']` is converted to `json "x"` (the type is NOT escaped)
 - `['cast', Symbol('x'), 'json']` is converted to `"x"::json` (the type is NOT escaped)
 - `['extract', Symbol('x'), 'month']` is converted to `EXTRACT(month FROM x)` (note the order change; also the last argument is NOT escaped)
 - `['case', [cond1, then1], [cond2, then2], [default]]` is converted to `CASE WHEN cond1 THEN then1 WHEN cond2 THEN then2 ELSE default END`
 
 Supported options are (all optional):
 - `fields`: a raw string or an array of columns to select
-- `group`: a raw string or an array of strings to use in the `GROUP BY` clause
+- `group`: a raw string or an array of expressions to use in the `GROUP BY` clause
 - `having`: a raw string or structured condition to use in the `HAVING` clause
-- `order`: a raw string to use in the `ORDER BY` clause
+- `order`: a raw string or an array of pairs [expression, 'ASC' | 'DESC'] to use in the `ORDER BY` clause
 - `limit`: a number to use in the `LIMIT` clause
 - `offset`: a number to use in the `OFFSET` clause
 
@@ -156,40 +157,36 @@ By default, the resulting query returns an array of rows. To re-map it to more s
 #### INSERT Queries
 
 ```javascript
-// Single insert without parameters (not recommended)
+// Single insert
 await db.users.insert({
-  name: 'John',
+  name: 'John', // Values will be parametrized by default (you can change this behavior by supplying "tranform" option)
   age: 30
 });
 
-// Using parameters and returning inserted ID
-const userName = 'John';
-const userAge = 30;
+// Returning inserted ID
 const result = await db.users.insert({
-    name: {$: userName},
-    age:  {$: userAge},
-  },
-  { returnId: true } // (PostgreSQL only, MySQL will always add insertId to output)
-);
+  name: 'John',
+  age:  30,
+}, { returnId: true }); // (PostgreSQL only, MySQL will always add insertId to output)
 // result will contain the ID of the inserted row
 
-// Batch insert with parameters
+// Batch insert with manually parametrized values
 await db.users.insert(usersToInsert.map(user => ({
   name: {$: user.name},
   age:  {$: user.age},
-})));
+})), { transform: false });
 
 // Upsert (handling conflicts)
 await db.users.insert({
-  id:         {$: 888352},
-  name:       {$: 'John'},
-  age:        {$: 30},
-  revision:   {$: 0},
-  joinedAt:   {
-    $: Date.now() / 1000,
-    type: 'timestamp', // Unixtime can be easily converted to timestamps
-  },
+  id:         888352,
+  name:       'John',
+  age:        30,
+  revision:   0,
+  joinedAt:   Date.now() / 1000,
 }, {
+  transform: {
+    joinedAt: 'timestamp', // Unixtime can be easily converted to timestamps
+  },
   unique: ['id'], // Needed only for PostgreSQL (upserts on MySQL will work without it)
   conflict: {
     name:     /update/, // Update name on conflict

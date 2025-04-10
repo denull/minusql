@@ -491,7 +491,7 @@ class Builder {
     }
     return [
       result.join(','),
-      fields.map(field => this.id(field)).join(','),
+      fields ? `(${fields.map(field => this.id(field)).join(',')})` : '',
     ];
   }
 
@@ -569,9 +569,6 @@ class Builder {
     table = this.table(table, params);
 
     [rows, fields] = this.rows(rows, fields, transform, params);
-    if (rows.length == 0) {
-      return;
-    }
 
     if (unique && Array.isArray(unique)) {
       unique = unique.map(field => this.id(field)).join(',');
@@ -597,10 +594,8 @@ class Builder {
         conflict === false ? ' IGNORE' : ''
       } INTO ${
         table
-      } (${
-        fields
-      }) VALUES ${
-        rows
+      }${
+        rows.length ? fields + ' VALUES ' + rows : '(SELECT NULL WHERE 1=0)'
       }${
         conflict || ''
       }${
@@ -665,6 +660,13 @@ class Tables {
   }
 }
 
+class Values {
+  constructor(rows, fields) {
+    this.rows = rows;
+    this.fields = fields;
+  }
+}
+
 class SQL extends Function {
   constructor(db, config = {}) {
     super();
@@ -689,11 +691,33 @@ class SQL extends Function {
           if (i === chunks.length - 1) {
             return chunk;
           }
-          params.push(argumentsList[i + 1]);
+          const arg = argumentsList[i + 1];
+          if (arg instanceof Values) {
+            if (arg.rows.length === 0) {
+              return chunk + '(SELECT NULL WHERE 1=0)'; // Workaround to insert 0 rows
+            }
+            let fields = arg.fields;
+            let values = [];
+            for (const row of arg.rows) {
+              if (!fields) {
+                fields = Object.keys(row);
+              }
+              values.push('(' + fields.map((key, i) => {
+                params.push(Array.isArray(row) ? row[i] : row[key]);
+                return '$' + params.length;
+              }).join(',') + ')');
+            };
+            return chunk + `(${fields.map(field => target.$builder.id(field)).join(',')}) VALUES ${values.join(',')}`;
+          }
+          params.push(arg);
           return chunk + '$' + (i + 1);
         }).join(''), params);
       },
     });
+  }
+
+  values(rows, fields) {
+    return new Values((!Array.isArray(rows) && typeof rows !== 'function') ? [rows] : rows, fields);
   }
 
   // Raw query
