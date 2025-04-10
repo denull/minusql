@@ -278,11 +278,9 @@ class Builder {
       if (Array.isArray(v)) {
         return v.map(el => this.value(el, params, true)).join(',');
       }
-      if (value.type === 'timestamp') {
-        // TODO: support MySQL?
-        //v = typeof v === 'number' ? v : (v instanceof Date ? Math.floor(v.getTime() / 1000) : v);
-        params.push(v);
-        return `TO_TIMESTAMP($${params.length}) AT TIME ZONE 'UTC'`;
+      if (value.type === 'unixtime') {
+        params.push(v instanceof Date ? v.getTime() / 1000 : (typeof v === 'string' && v.toUpperCase() === 'NOW' ? Date.now() / 1000 : v));
+        return `${isPostgres(this.sql) ? 'TO_TIMESTAMP' : 'FROM_UNIXTIME'}($${params.length})`;
       }
       params.push(v);
       return isPostgres(this.sql) ? `$${params.length}${t ? `::${t}` : ''}` : '?';
