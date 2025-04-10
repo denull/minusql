@@ -74,10 +74,14 @@ function isPostgres(sql) {
 }
 
 class Query {
-  constructor(sql, text, params = []) {
+  constructor(sql, text, params = [], options = {}) {
     Object.defineProperty(this, 'sql', {
       enumerable: false,
       value: sql,
+    });
+    Object.defineProperty(this, 'options', {
+      enumerable: false,
+      value: options,
     });
     this.text = text;
     this.params = params;
@@ -204,6 +208,18 @@ class Query {
       return rows[0];
     }
     return this.mapFn(value, rows[0], 0, rows);
+  }
+
+  async withId() { // To be used in conjuction with insert({ ... }, { returnId: true }) - returns original object augmented with inserted id
+    if (!this.options.firstRow) {
+      throw new Error('withId() can only be called on query created using insert() method');
+    }
+    const rows = await this.sql.exec(this);
+    console.log(rows);
+    if (isPostgres(this.sql)) {
+      return Object.assign({}, this.options.firstRow, rows[0]);
+    }
+    return Object.assign({}, this.options.firstRow, { id: rows[0].insertId }); // TODO: Column may not always be called 'id'?
   }
 
   then(onFullfilled, onRejected) {
@@ -517,9 +533,13 @@ class Builder {
       rows = [rows];
     }
     const result = [];
+    let firstRow = null;
     for (const v of rows) {
       if (!fields) {
         fields = Object.keys(v);
+      }
+      if (!firstRow) {
+        firstRow = v;
       }
       result.push('(' + fields.map(key => {
         if (typeof transform === 'function') {
@@ -551,10 +571,10 @@ class Builder {
         return this.expr({$: value}, params);
       }).join(',') + ')');
     }
-    return [
-      result.join(','),
-      fields ? `(${fields.map(field => this.id(field)).join(',')})` : '',
-    ];
+    if (!result.length) {
+      return { values: '(SELECT NULL WHERE 1=0)', firstRow };
+    }
+    return { values: `(${fields.map(field => this.id(field)).join(',')}) VALUES ${result.join(',')}`, firstRow };
   }
 
   conflict(conflict, table, params) {
@@ -630,7 +650,7 @@ class Builder {
     const params = [];
     table = this.table(table, params);
 
-    [rows, fields] = this.rows(rows, fields, transform, params);
+    const { values, firstRow } = this.rows(rows, fields, transform, params);
 
     if (unique && Array.isArray(unique)) {
       unique = unique.map(field => this.id(field)).join(',');
@@ -657,12 +677,12 @@ class Builder {
       } INTO ${
         table
       }${
-        rows.length ? fields + ' VALUES ' + rows : '(SELECT NULL WHERE 1=0)'
+        values
       }${
         conflict || ''
       }${
         returnId && isPostgres(this.sql) ? ' RETURNING ' + (returnId === true ? 'id' : returnId) : ''
-      }`, params);
+      }`, params, { firstRow });
   }
 
   delete(table, where) {
