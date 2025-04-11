@@ -700,7 +700,6 @@ class Query {
       throw new Error('withId() can only be called on query created using insert() method');
     }
     const rows = await this.sql.exec(this);
-    console.log(rows);
     if (isPostgres(this.sql)) {
       return Object.assign({}, this.options.firstRow, rows[0]);
     }
@@ -926,7 +925,6 @@ class SQL extends Function {
       params = query.params;
       query = query.text;
     }
-    console.log(query, params);
     return new Promise(async (resolve, reject) => {
       const convertResults = (results) => {
         if (!Array.isArray(results)) { // MySQL behavior is a bit inconsistent with everything else
