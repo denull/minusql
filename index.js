@@ -6,7 +6,6 @@ function toSnakeCase(k) {
   return k ? (k + '').replace(/(([a-z])(?=[A-Z]([a-zA-Z]|$))|([A-Z])(?=[A-Z][a-z]))/g,'$1_').toLowerCase() : k;
 }
 
-
 const CHARS_GLOBAL_REGEXP = /[\0\b\t\n\r\x1a\"\'\\]/g;
 const CHARS_ESCAPE_MAP    = {
   '\0'   : '\\0',
@@ -19,6 +18,12 @@ const CHARS_ESCAPE_MAP    = {
   '\''   : '\\\'',
   '\\'   : '\\\\'
 };
+
+function escapeMysqlIdent(val, forbidQualified) { // From sqlstring
+  return forbidQualified ?
+    '`' + String(val).replace(/`/g, '``') + '`' :
+    '`' + String(val).replace(/`/g, '``').replace(/\./g, '`.`') + '`';
+}
 
 function escapeMysqlString(val) { // From sqlstring
   let chunkIndex = CHARS_GLOBAL_REGEXP.lastIndex = 0;
@@ -40,6 +45,12 @@ function escapeMysqlString(val) { // From sqlstring
   }
 
   return "'" + escapedVal + "'";
+}
+
+function escapePostgresIdent(val, forbidQualified) {
+  return forbidQualified ?
+    '"' + String(val).replace(/"/g, '""') + '"' :
+    '"' + String(val).replace(/"/g, '""').replace(/\./g, '"."') + '"';
 }
 
 function escapePostgresString(val) { // From pg-format
@@ -73,22 +84,496 @@ function isPostgres(sql) {
   return sql.$config.flavor === 'postgres';
 }
 
-class Query {
-  constructor(sql, text, params = [], options = {}) {
-    Object.defineProperty(this, 'sql', {
-      enumerable: false,
-      value: sql,
-    });
-    Object.defineProperty(this, 'options', {
-      enumerable: false,
-      value: options,
-    });
-    this.text = text;
+const MaybeUnaryOperators = [
+  '-', '~', '#', '@@', '@-@', '?-', '!!', ':', '|/', '||/', '@', '%',
+];
+const BinaryOperators = [
+  '=', '!=', '<>', '>', '>=', '<', '<=', // Comparison
+  '>>', '<<', '%', 'MOD', 'DIV', // Arithmetic
+  'LIKE', 'NOT LIKE', 'ILIKE', 'NOT ILIKE', 'SIMILAR TO', 'NOT SIMILAR TO', // Pattern-matching
+  'REGEXP', 'RLIKE', 'NOT REGEXP', 'NOT RLIKE', 'SOUNDS LIKE', // MySQL RegExps & Soundex
+  '~~', '!~~', '~', '~*', '!~', '!~*', // Postgres patterns and RegExps
+  '->', '->>', '#>', '#>>', '@>', '<@', '?', '?|', '?&', '#-', // Postgres JSON operators
+  '@@', '&&', '<->', // Postgres full-text search operators
+  '#', '@-@', '@@', '##', '<^', '>^', '?#', '?-', '?-|', '?||', // Postgres geometry
+  '&&&', '&<', '&<|', '&>', '<<|', '@', '|&>', '|>>', '~=', '|=|', '<#>', '<<->>', // PostGIS operators
+  '<%', '%>', '<<%', '%>>', '<<->', '<->>', '<<<->', '<->>>', // Postgres trigram operators
+  'AT TIME ZONE', 'OVERLAPS', '>>=', '<<=', '!!=', '-|-', // Misc Postgres operators
+];
+const Operators = [
+  ...BinaryOperators,
+  '+', '-', '*', '/', '&', '|', '^',
+  'AND', 'OR', 'XOR',
+  '||', // Postgres concatenation
+];
+class QueryParts {
+  constructor(sql, chunks, params = []) {
+    this.sql = sql;
+    this.chunks = chunks ? (Array.isArray(chunks) ? chunks : [chunks]) : [''];
     this.params = params;
   }
 
   toString() {
-    return this.text;
+    return this.chunks.map(isPostgres(this.sql) ? (chunk, i) => {
+      return (i > 0 ? '$' + i : '') + chunk;
+    } : (chunk, i) => {
+      return (i > 0 ? '?' : '') + chunk;
+    }).join('');
+  }
+  
+  append(...args) {
+    if (Array.isArray(args[0])) {
+      for (let i = 0; i < args[0].length; i++) {
+        if (i > 0 && args[2]) {
+          this.chunks[this.chunks.length - 1] += args[2];
+        }
+        args[1].call(this, args[0][i], i, args[0]);
+      }
+      return this;
+    }
+    this.chunks[this.chunks.length - 1] += args[0];
+    for (let i = 1; i < args.length; i++) {
+      if (i % 2 === 1) {
+        this.params.push(args[i]);
+      } else {
+        this.chunks.push(args[i]);
+      }
+    }
+    if (args.length % 2 === 0) { // Last chunk should always be a string
+      this.chunks.push('');
+    }
+    return this; // Make chainable
+  }
+
+  ident(ident) {
+    if (ident === '*') return '*';
+    if (this.sql.$config.convertCase) {
+      ident = toSnakeCase(ident);
+    }
+    return isMySQL(this.sql) ? escapeMysqlIdent(ident) : escapePostgresIdent(ident); 
+  }
+
+  keyword(name) {
+    if (!/^[A-Za-z ]+/.test(name)) {
+      throw new Error(`Keyword expected here, got "${name}" instead`);
+    }
+    return name;
+  }
+
+  regexp({ source, flags }, forceRegExp) {
+    const isCaseSensitive = !flags.includes('i');
+    let pattern;
+    if (!forceRegExp) {
+      pattern = source
+        .replace(/^\^/, '').replace(/\$$/, '')
+        .replace(/%/g, '\\%').replace(/_/g, '\\_')
+        .replace(/\.\*/g, '%').replace(/\./g, '_');
+      
+      if (!source.startsWith('^') && !pattern.startsWith('%')) {
+        pattern = '%' + pattern;
+      }
+      if (!source.endsWith('$') && (!pattern.endsWith('%') || pattern.endsWith('\\%'))) {
+        pattern = pattern + '%';
+      }
+
+      const isComplex = 
+        /[\^\$\(\)\[\]\{\}\?\+\*\|]/.test(pattern) || // Special RegExp chars
+        /\\[dDsSwWbB]/.test(source) || // Character classes
+        /\(\?[=!:]/.test(source);      // Lookahead/lookbehind
+      if (!isComplex) {
+        return {
+          pattern,
+          append: (lhs, inVar) =>
+            isCaseSensitive ? this.append(`${this.ident(lhs)} LIKE `).value(pattern, inVar) :
+              (isPostgres(this.sql) ? this.append(`${this.ident(lhs)} ILIKE `).value(pattern, inVar) :
+                this.append(`LOWER(${this.ident(lhs)}) LIKE `).value(pattern.toLowerCase(), inVar)),
+        }
+      }
+    }
+
+    pattern = source;
+    if (isPostgres(this.sql)) {
+      pattern = pattern
+        .replace(/\\b/g, '\\y');
+
+      return {
+        pattern,
+        append: (lhs, inVar) =>
+          this.append(`${this.ident(lhs)} ${isCaseSensitive ? '~' : '~*'} `).value(pattern, inVar),
+      }
+    }
+
+    return {
+      pattern,
+      append: (lhs, params, inVar) =>
+        this.append(`${this.ident(lhs)} REGEXP `).value(pattern, inVar).append(isCaseSensitive ? '' : ' COLLATE utf8_general_ci'),
+    }
+  }
+
+  value(value, inVar = false) {
+    if (isVar(value) || inVar) {
+      let v = inVar ? value : value.$;
+      let t = inVar ? false : value.type;
+      if (Array.isArray(v)) {
+        return this.append(v, el => this.value(el, true), ',');
+      }
+      if (v instanceof RegExp) {
+        v = this.regexp(v, true).pattern;
+      }
+      if (value.type === 'unixtime') {
+        return this.append(
+          isPostgres(this.sql) ? 'TO_TIMESTAMP(' : 'FROM_UNIXTIME(',
+          v instanceof Date ?
+            v.getTime() / 1000 : (
+              typeof v === 'string' && v.toUpperCase() === 'NOW' ?
+              Date.now() / 1000 : v
+            ),
+          ')',
+        );
+      }
+      if (t) {
+        return isPostgres(this.sql) ? this.append('', v, `::${t}`) : this.append('CAST(', v, ` AS ${t})`);
+      }
+      return this.append('', v);
+    }
+    if (value === null || value === undefined) {
+      return this.append('NULL');
+    }
+    switch (typeof value) {
+      case 'symbol': return this.append(this.ident(value.description));
+      case 'boolean': return this.append(isPostgres(this.sql) ? (value ? `'t'` : `'f'`) : (value ? 'true' : 'false'));
+      case 'number': return this.append(value + '');
+      case 'string': return this.append(isPostgres(this.sql) ? escapePostgresString(value) : escapeMysqlString(value));
+      default:
+        if (value instanceof RegExp) {
+          const { pattern } = this.regexp(value, true);
+          return this.append(isPostgres(this.sql) ? escapePostgresString(pattern) : escapeMysqlString(pattern));
+        }
+        throw new Error(`Unsupported type: ${typeof value}, ${JSON.stringify(value)}`);
+    }
+  }
+  
+  expr(e) {
+    // Two variants: array (['func', ...args]) and object ({ field: value, ... })
+    if (Array.isArray(e) && !isVar(e)) {
+      if (typeof e[0] !== 'string') {
+        throw new Error(`First element of array-style expression must a function/operator name, got "${e[0]}" instead`);
+      }
+      const fn = e.shift().toUpperCase();
+      function checkArity(n) {
+        if (e.length != n) throw new Error(`"${fn}" requires exactly ${n} operands (${e.length} supplied)`);
+      }
+  
+      // Operators
+      if (MaybeUnaryOperators.includes(fn) && (e.length === 1)) {
+        return this.append(fn + ' ').expr(e[0]);
+      }
+      if (Operators.includes(fn)) {
+        if (BinaryOperators.includes(fn)) {
+          checkArity(2);
+        }
+        return this.append('(').append(e, this.expr, ` ${fn} `).append(q, ')');
+      }
+  
+      switch (fn) {
+        case 'IN':
+        case 'NOTIN':
+        case 'NOT IN':
+          checkArity(2);
+          this.expr(e[0])
+            .append(fn === 'IN' ? ' IN (' : ' NOT IN (');
+          if (isVar(e[1])) {
+            return this.value(e[1]).append(q, ')');
+          }
+          if (!Array.isArray(e[1])) {
+            throw new Error(`"${fn}" should take array as its second argument, ${typeof e[1]} supplied`);
+          }
+          return this.append(e[1], this.expr, ',').append(q, ')');
+        case 'IS NULL':
+        case 'IS NOT NULL':
+          checkArity(1);
+          return this.expr(e[0]).append(` ${fn} `);
+        case 'NOT':
+          checkArity(1);
+          return this.append(` ${fn} `).expr(e[0]);
+        case 'BETWEEN':
+        case 'NOT BETWEEN':
+          checkArity(3);
+          return this.expr(e[0]).append(` ${fn} `).expr(e[1]).append(' AND ').expr(e[2]);
+        case 'TYPE':
+          checkArity(2);
+          return this.append(this.keyword(e[1]) + ' ').expr(e[0]);
+        case 'CAST':
+          checkArity(2);
+          if (isPostgres(this.sql)) {
+            return this.expr(e[0]).append(`::${this.keyword(e[1])}`);
+          }
+          return this.append('CAST(').expr(e[0]).append(` AS ${this.keyword(e[1])})`);
+        case 'EXTRACT':
+          checkArity(2);
+          return this.append(`EXTRACT(${this.keyword(e[1])} FROM `).expr(e[0]).append(')');
+        case 'CASE':
+          return this.append('CASE ')
+            .append((cond, i) => {
+              if (cond.length > 1) {
+                return this.append('WHEN ')
+                  .expr(cond[0])
+                  .append(' THEN ')
+                  .expr(cond[1]);
+              }
+              if (i === 0) {
+                return this.expr(cond[0]);
+              }
+              if (i === e.length - 1) {
+                return this.append('ELSE ')
+                  .expr(cond[0]);
+              }
+              throw new Error('Invalid case format');
+            }, ' ')
+            .append(' END');
+        default:
+          return this.append(`${this.keyword(fn)}(`)
+            .append(e, this.expr, ',')
+            .append(')');
+      }
+    }
+
+    if (e && typeof e === 'object' && !isVar(e) && !(e instanceof RegExp)) {
+      return this.append(Object.keys(e), k => {
+        const v = e[k];
+        if (Array.isArray(v)) {
+          return this.expr([v[0], Symbol(k), ...v.slice(1)]);
+        } else
+        if (v === null) {
+          return this.append(`${this.ident(k)} IS NULL`);
+        } else
+        if (v instanceof RegExp) {
+          return this.regexp(v).append(k);
+        } else
+        if (v && typeof v === 'object' && '$' in v && v.$ instanceof RegExp) {
+          return this.regexp(v.$).append(k, true);
+        }
+        return this.append(`${this.ident(k)} = `).value(v);
+      }, ' AND ');
+    }
+
+    return this.value(e);
+  }
+
+  table(tables) {
+    return this.append(tables, (t, i) => {
+      if (typeof t === 'string') {
+        return this.append(`${i > 0 ? 'LEFT JOIN ' : ''}${this.ident(t)}`);
+      }
+      if (i > 0) {
+        this.append((t.join || 'LEFT') + ' JOIN ');
+      }
+      if (t.table instanceof Query) {
+        this.append('(' + t.table.chunks[0]);
+        this.params.push(...t.table.params);
+        this.chunks.push(...t.table.chunks.slice(1));
+        this.append(')');
+      } else {
+        this.append(this.ident(table));
+      }
+      if (t.as) {
+        this.append(` AS ${this.ident(t.as)}`);
+      }
+      if (t.on) {
+        this.append(' ON ').where(q, t.on);
+      }
+    }, ' ');
+  }
+
+  fields(fields) {
+    if (typeof fields === 'string') {
+      return this.append(fields);
+    }
+    if (Array.isArray(fields)) {
+      return this.append(fields, (field) => this.append(this.ident(field)), ',');
+    }
+    return this.append(Object.keys(fields), (q, field) => {
+      if (fields[field] === true) {
+        return this.append(this.ident(field));
+      }
+      this.expr(fields[field]).append(` AS ${this.ident(field)}`);
+    }, ',');
+  }
+
+  where(where) {
+    if (!where) {
+      return this;
+    }
+    return this.expr(where);
+  }
+
+  exprs(exprs) {
+    if (typeof exprs === 'string') {
+      return this.append(exprs);
+    }
+    if (Array.isArray(exprs)) {
+      return this.append(exprs, (e) => (typeof e === 'string') ? this.append(e) : this.expr(e), ',');
+    }
+    return this.expr(exprs);
+  }
+
+  order(exprs) {
+    if (typeof exprs === 'string') {
+      return this.append(exprs);
+    }
+    if (Array.isArray(exprs)) {
+      return this.append(exprs, (e) => (typeof e === 'string') ?
+        this.append(e) :
+        this.expr(e[0]).append(e[1] ? ` ${this.keyword(e[1])}` : ''), ',');
+    }
+    return this.expr(exprs);
+  }
+
+  updates(updates, transform) {
+    if (typeof updates === 'string') {
+      return this.append(updates);
+    }
+    return this.append(Object.keys(updates), (key) => {
+      this.append(`${this.ident(key)}=`);
+      if (typeof transform === 'function') {
+        return this.expr(transform(key, updates));
+      }
+      
+      const value = updates[key];
+      if (transform === false) { // do not wrap any values at all
+        return this.expr(value);
+      } else
+      if (typeof transform === 'object') {
+        if (transform[key] === false) { // false = do not wrap (as a parameter)
+          return this.expr(value);
+        } else
+        if (typeof transform[key] === 'string') { // string = wrap with type
+          if (value && typeof value === 'object' && '$' in value) { // already wrapped, add type
+            return this.expr(Object.assign({}, value, {type: transform[key]}));
+          }
+          return this.expr({$: value, type: transform[key]});
+        } else
+        if (typeof transform[key] === 'function') { // function = wrapper function
+          return this.expr(transform[key](value, updates));
+        }
+      }
+
+      if (value && typeof value === 'object' && '$' in value) { // Already wrapped
+        return this.expr(value);
+      }
+      return this.expr({$: value});
+    }, ',');
+  }
+
+  rows(rows, fields, transform) {
+    if (typeof rows === 'number') {
+      rows = Array(rows);
+    } else
+    if (typeof rows === 'function') {
+      rows = [...rows];
+    } else
+    if (!Array.isArray(rows)) {
+      rows = [rows];
+    }
+
+    if (!rows.length) {
+      this.append('(SELECT NULL WHERE 1=0)');
+      return null;
+    }
+    if (!fields) {
+      fields = Object.keys(rows[0]);
+    }
+
+    this.append('(')
+      .append(fields, (field) => this.ident(field), ',')
+      .append(') VALUES (')
+      .append(rows, (row, i) =>
+        this.append('(')
+          .append(fields, (key) => {
+            if (typeof transform === 'function') {
+              return this.value(transform(key, row, i, rows));
+            }
+            const value = row[key];
+            if (transform === false) { // do not wrap any values at all
+              return this.expr(value);
+            } else
+            if (typeof transform === 'object') {
+              if (transform[key] === false) { // false = do not wrap (as a parameter)
+                return this.expr(value);
+              } else
+              if (typeof transform[key] === 'string') { // string = wrap with type
+                if (value && typeof value === 'object' && '$' in value) { // already wrapped, add type
+                  return this.expr(Object.assign({}, value, {type: transform[key]}));
+                }
+                return this.expr({$: value, type: transform[key]});
+              } else
+              if (typeof transform[key] === 'function') { // function = wrapper function
+                return this.expr(transform[key](value, row, result.length, rows));
+              }
+            }
+            if (value && typeof value === 'object' && '$' in value) { // Already wrapped
+              return this.expr(value);
+            }
+            return this.expr({$: value});
+          }, ',')
+          .append(')'),
+      ',');
+    return rows[0];
+  }
+
+  conflict(conflict, table) {
+    if (!conflict) {
+      return this;
+    }
+    if (typeof conflict === 'string') {
+      return this.append(conflict);
+    }
+    return this.append(Object.keys(conflict), (key) => {
+      const field = this.ident(key);
+      const exclId = isPostgres(this.sql) ? `EXCLUDED.${field}` : `VALUES(${field})`;
+      const value = conflict[key];
+      if (value instanceof RegExp) {
+        switch (value.source.toLowerCase()) {
+          case 'update': return this.append(`${field}=${exclId}`);
+          case 'fill':   return this.append(`${field}=COALESCE(${table}.${field}, ${exclId})`);
+          case 'inc':    return this.append(`${field}=${table}.${field}+1`);
+          case 'dec':    return this.append(`${field}=${table}.${field}-1`);
+          case 'add':    return this.append(`${field}=${table}.${field}+${exclId}`);
+          case 'sub':    return this.append(`${field}=${table}.${field}-${exclId}`);
+          case 'max':    return this.append(`${field}=GREATEST(${table}.${field}, ${exclId})`);
+          case 'min':    return this.append(`${field}=LEAST(${table}.${field}, ${exclId})`);
+          default: throw new Error(`Unknown conflict rule: ${value.source}`);
+        }
+      } else {
+        return this.append(`${field}=`).expr(value, params);
+      }
+    }, ',');
+  }
+}
+
+class Query {
+  constructor(parts, options = {}) {
+    Object.defineProperties(this, {
+      sql:      { value: parts.sql },
+      parts:    { value: parts },
+      options:  { value: options },
+      text: {
+        enumerable: true,
+        get() {
+          return this.parts.toString();
+        }
+      },
+      params: {
+        enumerable: true,
+        get() {
+          return this.parts.params;
+        }
+      }
+    });
+  }
+
+  toString() {
+    return this.parts.toString();
   }
 
   mapFn(field, row, index, rows) {
@@ -231,436 +716,47 @@ class Query {
   }
 
   explain(opts = {}) {
-    return new Query(this.sql, `EXPLAIN${
+    const prefix = `EXPLAIN${
       isPostgres(this.sql) && Object.keys(opts).length ? ` (${Object.keys(opts).map(opt => `${opt.toUpperCase()} ${opts[opt] + ''}`).join(',')})` : ''
-    } ` + this.text, this.params);
+    } `;
+    return new Query(new QueryParts(this.sql, [
+      prefix + this.parts.chunks[0], ...this.parts.chunks.slice(1)
+    ], this.params));
   }
 }
-
-const MaybeUnaryOperators = [
-  '-', '~', '#', '@@', '@-@', '?-', '!!', ':', '|/', '||/', '@', '%',
-];
-const BinaryOperators = [
-  '=', '!=', '<>', '>', '>=', '<', '<=', // Comparison
-  '>>', '<<', '%', 'MOD', 'DIV', // Arithmetic
-  'LIKE', 'NOT LIKE', 'ILIKE', 'NOT ILIKE', 'SIMILAR TO', 'NOT SIMILAR TO', // Pattern-matching
-  'REGEXP', 'RLIKE', 'NOT REGEXP', 'NOT RLIKE', 'SOUNDS LIKE', // MySQL RegExps & Soundex
-  '~~', '!~~', '~', '~*', '!~', '!~*', // Postgres patterns and RegExps
-  '->', '->>', '#>', '#>>', '@>', '<@', '?', '?|', '?&', '#-', // Postgres JSON operators
-  '@@', '&&', '<->', // Postgres full-text search operators
-  '#', '@-@', '@@', '##', '<^', '>^', '?#', '?-', '?-|', '?||', // Postgres geometry
-  '&&&', '&<', '&<|', '&>', '<<|', '@', '|&>', '|>>', '~=', '|=|', '<#>', '<<->>', // PostGIS operators
-  '<%', '%>', '<<%', '%>>', '<<->', '<->>', '<<<->', '<->>>', // Postgres trigram operators
-  'AT TIME ZONE', 'OVERLAPS', '>>=', '<<=', '!!=', '-|-', // Misc Postgres operators
-];
-const Operators = [
-  ...BinaryOperators,
-  '+', '-', '*', '/', '&', '|', '^',
-  'AND', 'OR', 'XOR',
-  '||', // Postgres concatenation
-];
 
 class Builder {
   constructor(sql) {
     this.sql = sql;
   }
 
-  tableCase(name) {
-    return this.sql.$config.convertCase ? toSnakeCase(name) : name;
-  }
-
-  id(name) {
-    if (name === '*') return '*';
-    return this.tableCase(name).split('.').map(id => isMySQL(this.sql) ? `\`${id}\`` : `"${id}"`).join('.'); 
-  }
-
-  keyword(name) {
-    if (/^[A-Za-z ]+/.match(name)) {
-      throw new Error(`Keyword expected here, got "${name}" instead`);
-    }
-    return name;
-  }
-
-  value(value, params, inVar = false) {
-    if (value === null || value === undefined) {
-      return 'NULL';
-    }
-    if (isVar(value) || inVar) {
-      if (!params) {
-        throw new Error('Parameters not supported here');
-      }
-      let v = inVar ? value : value.$;
-      let t = inVar ? false : value.type;
-      if (Array.isArray(v)) {
-        return v.map(el => this.value(el, params, true)).join(',');
-      }
-      if (v instanceof RegExp) {
-        v = this.regexp(v, true).pattern;
-      }
-      if (value.type === 'unixtime') {
-        params.push(v instanceof Date ? v.getTime() / 1000 : (typeof v === 'string' && v.toUpperCase() === 'NOW' ? Date.now() / 1000 : v));
-        return `${isPostgres(this.sql) ? 'TO_TIMESTAMP' : 'FROM_UNIXTIME'}($${params.length})`;
-      }
-      params.push(v);
-      return isPostgres(this.sql) ? `$${params.length}${t ? `::${t}` : ''}` : '?';
-    }
-    switch (typeof value) {
-      case 'symbol': return this.id(value.description);
-      case 'boolean': return isPostgres(this.sql) ? (value ? `'t'` : `'f'`) : (value ? 'true' : 'false');
-      case 'number': return value + '';
-      case 'string': return isPostgres(this.sql) ? escapePostgresString(value) : escapeMysqlString(value);
-      default:
-        if (value instanceof RegExp) {
-          const { pattern } = this.regexp(value, true);
-          return isPostgres(this.sql) ? escapePostgresString(pattern) : escapeMysqlString(pattern);
-        }
-        throw new Error(`Unsupported type: ${typeof value}, ${JSON.stringify(value)}`);
-    }
-  }
-
-  regexp({ source, flags }, forceRegExp) {
-    const isCaseSensitive = !flags.includes('i');
-    let pattern;
-    if (!forceRegExp) {
-      pattern = source
-        .replace(/^\^/, '').replace(/\$$/, '')
-        .replace(/%/g, '\\%').replace(/_/g, '\\_')
-        .replace(/\.\*/g, '%').replace(/\./g, '_');
-      
-      if (!source.startsWith('^') && !pattern.startsWith('%')) {
-        pattern = '%' + pattern;
-      }
-      if (!source.endsWith('$') && (!pattern.endsWith('%') || pattern.endsWith('\\%'))) {
-        pattern = pattern + '%';
-      }
-
-      const isComplex = 
-        /[\^\$\(\)\[\]\{\}\?\+\*\|]/.test(pattern) || // Special RegExp chars
-        /\\[dDsSwWbB]/.test(source) || // Character classes
-        /\(\?[=!:]/.test(source);      // Lookahead/lookbehind
-      if (!isComplex) {
-        return {
-          pattern,
-          transform: (lhs, params, inVar) =>
-            isCaseSensitive ? `${this.id(lhs)} LIKE ${this.value(pattern, params, inVar)}` :
-              (isPostgres(this.sql) ? `${this.id(lhs)} ILIKE ${this.value(pattern, params, inVar)}` :
-                `LOWER(${this.id(lhs)}) LIKE ${this.value(pattern.toLowerCase(), params, inVar)}`),
-        }
+  select(table, where, { fields = '*', distinct, group, having, order, limit, offset } = {}) {
+    const parts = new QueryParts(this.sql, 'SELECT ');
+    if (distinct) {
+      parts.append('DISTINCT ');
+      if (distinct !== true) {
+        parts.append('ON (');
+        parts.exprs(distinct);
+        parts.append(') ');
       }
     }
-
-    pattern = source;
-    if (isPostgres(this.sql)) {
-      pattern = pattern
-        .replace(/\\b/g, '\\y');
-
-      return {
-        pattern,
-        transform: (lhs, params, inVar) =>
-          `${this.id(lhs)} ${isCaseSensitive ? '~' : '~*'} ${this.value(pattern, params, inVar)}`,
-      }
-    }
-
-    return {
-      pattern,
-      transform: (lhs, params, inVar) =>
-        `${this.id(lhs)} REGEXP ${this.value(pattern, params, inVar)}${isCaseSensitive ? '' : ' COLLATE utf8_general_ci'}`,
-    }
-  }
-  
-  expr(e, ps) {
-    // Two variants: array (['func', ...args]) and object ({ field: value, ... })
-    if (Array.isArray(e) && !isVar(e)) {
-      if (typeof e[0] !== 'string') {
-        throw new Error(`First element of array-style expression must a function/operator name, got "${e[0]}" instead`);
-      }
-      const fn = e.shift().toUpperCase();
-      function checkArity(n) {
-        if (e.length != n) throw new Error(`"${fn}" requires exactly ${n} operands (${e.length} supplied)`);
-      }
-  
-      // Operators
-      if (MaybeUnaryOperators.includes(fn) && (e.length === 1)) {
-        return `${fn} ${this.expr(e[0], ps)}`;
-      }
-      if (Operators.includes(fn)) {
-        if (BinaryOperators.includes(fn)) {
-          checkArity(2);
-        }
-        return `(${e.map(e => this.expr(e, ps)).join(` ${fn} `)})`;
-      }
-  
-      switch (fn) {
-        case 'IN':
-        case 'NOTIN':
-        case 'NOT IN':
-          checkArity(2);
-          const list = isVar(e[1]) ? this.value(e[1], ps) : e[1].map(e => this.expr(e, ps)).join(',');
-          return `${this.expr(e[0], ps)}${fn === 'IN' ? '' : ' NOT'} IN (${list})`;
-        case 'IS NULL':
-        case 'IS NOT NULL':
-          checkArity(1);
-          return `${this.expr(e[0], ps)} ${fn}`;
-        case 'NOT':
-          checkArity(1);
-          return `${fn} ${this.expr(e[0], ps)}`;
-        case 'BETWEEN':
-        case 'NOT BETWEEN':
-          checkArity(3);
-          return `${this.expr(e[0], ps)} ${fn} ${this.expr(e[1], ps)} AND ${this.expr(e[2], ps)}`;
-        case 'TYPE':
-          checkArity(2);
-          return `${this.keyword(e[1])} ${this.expr(e[0], ps)}`;
-        case 'CAST':
-          checkArity(2);
-          return isPostgres(this.sql) ? `${this.expr(e[0], ps)}::${e[1]}` : `CAST(${this.expr(e[0], ps)} AS ${this.keyword(e[1])})`;
-        case 'EXTRACT':
-          checkArity(2);
-          return `EXTRACT(${e[1]} FROM ${this.expr(e[0], ps)})`;
-        case 'CASE':
-          return `CASE ${
-          e.map((cond, i, e) =>
-            cond.length > 1 ?
-              `WHEN ${this.expr(cond[0], ps)} THEN ${this.expr(cond[1], ps)}` :
-              (i === 0 ?
-                this.expr(cond[0], ps) :
-                (i === e.length - 1 ?
-                  `ELSE ${this.expr(cond[0], ps)}` :
-                  (() => { throw new Error('Invalid case format') })
-                )
-              )
-          ).join(' ')
-        } END`;
-        default: return `${fn}(${e.map(e => this.expr(e, ps)).join(',')})`;
-      }
-    }
-
-    if (e && typeof e === 'object' && !isVar(e) && !(e instanceof RegExp)) {
-      return Object.keys(e).map(k => {
-        const v = e[k];
-        const field = this.tableCase(k);
-        if (Array.isArray(v)) {
-          return this.expr([v[0], Symbol(field), ...v.slice(1)], ps);
-        } else
-        if (v === null) {
-          return `${this.id(field)} IS NULL`;
-        } else
-        if (v instanceof RegExp) {
-          return this.regexp(v).transform(field, ps);
-        } else
-        if (v && typeof v === 'object' && '$' in v && v.$ instanceof RegExp) {
-          return this.regexp(v.$).transform(field, ps, true);
-        } else {
-          return `${this.id(field)} = ${this.value(v, ps)}`;
-        }
-      }).join(' AND ');
-    }
-
-    return this.value(e, ps);
-  }
-
-  table(tables, params) {
-    return tables.map((t, i) => {
-      if (typeof t === 'string') {
-        return `${i > 0 ? 'LEFT JOIN ' : ''}${this.tableCase(t)}`;
-      }
-      return `${i > 0 ? (t.join || 'LEFT') + ' JOIN ' : ''}${
-        typeof t.table === 'string' ? this.tableCase(t.table) : `(${t.table})`
-      }${
-        t.as ? ' AS ' + t.as : ''
-      }${
-        t.on ? ' ON ' + this.where(t.on) : ''
-      }`;
-    }).join(' ');
-  }
-
-  fields(fields, params) {
-    if (typeof fields === 'string') {
-      return fields;
-    }
-    if (Array.isArray(fields)) {
-      return this.sql.$config.convertCase ? fields.map(toSnakeCase).join(',') : fields.join(',');
-    }
-    return Object.keys(fields).map(field => {
-      const id = this.tableCase(field);
-      return (fields[field] === true) ? id : `${this.expr(fields[field], params)} AS ${id}`;
-    }).join(',');
-  }
-
-  where(where, params) {
-    if (!where) {
-      return '';
-    }
-    return this.expr(where, params);
-  }
-
-  exprs(exprs, params) {
-    if (typeof exprs === 'string') {
-      return exprs;
-    }
-    if (Array.isArray(exprs)) {
-      return exprs.map(e => typeof e === 'string' ? e : this.expr(e, params)).join(',');
-    }
-    return this.expr(e, params);
-  }
-
-  order(exprs, params) {
-    if (typeof exprs === 'string') {
-      return exprs;
-    }
-    if (Array.isArray(exprs)) {
-      return exprs.map(e => typeof e === 'string' ? e : `${this.expr(e[0], params)}${e[1] ? ' ' + e[1] : ''}`).join(',');
-    }
-    return this.expr(e, params);
-  }
-
-  updates(updates, transform, params) {
-    if (typeof updates === 'string') {
-      return updates;
-    }
-    return Object.keys(updates).map(key => {
-      if (typeof transform === 'function') {
-        return `${this.id(key)}=${this.expr(transform(key, updates), params)}`;
-      }
-      
-      const value = updates[key];
-      if (transform === false) { // do not wrap any values at all
-        return `${this.id(key)}=${this.expr(value, params)}`;
-      } else
-      if (typeof transform === 'object') {
-        if (transform[key] === false) { // false = do not wrap (as a parameter)
-          return `${this.id(key)}=${this.expr(value, params)}`;;
-        } else
-        if (typeof transform[key] === 'string') { // string = wrap with type
-          if (value && typeof value === 'object' && '$' in value) { // already wrapped, add type
-            return `${this.id(key)}=${this.expr(Object.assign({}, value, {type: transform[key]}), params)}`;
-          }
-          return `${this.id(key)}=${this.expr({$: value, type: transform[key]}, params)}`;
-        } else
-        if (typeof transform[key] === 'function') { // function = wrapper function
-          return `${this.id(key)}=${this.expr(transform[key](value, updates), params)}`;
-        }
-      }
-
-      if (value && typeof value === 'object' && '$' in value) { // Already wrapped
-        return `${this.id(key)}=${this.expr(value, params)}`;
-      }
-      return `${this.id(key)}=${this.expr({$: value}, params)}`;
-    }).join(',');
-  }
-
-  rows(rows, fields, transform, params) {
-    if (typeof rows === 'number') {
-      rows = Array(rows);
-    } else
-    if (!Array.isArray(rows) && typeof rows !== 'function') {
-      rows = [rows];
-    }
-    const result = [];
-    let firstRow = null;
-    for (const v of rows) {
-      if (!fields) {
-        fields = Object.keys(v);
-      }
-      if (!firstRow) {
-        firstRow = v;
-      }
-      result.push('(' + fields.map(key => {
-        if (typeof transform === 'function') {
-          return this.value(transform(key, v, result.length, rows), params);
-        }
-        
-        const value = v[key];
-        if (transform === false) { // do not wrap any values at all
-          return this.expr(value, params);
-        } else
-        if (typeof transform === 'object') {
-          if (transform[key] === false) { // false = do not wrap (as a parameter)
-            return this.expr(value, params);
-          } else
-          if (typeof transform[key] === 'string') { // string = wrap with type
-            if (value && typeof value === 'object' && '$' in value) { // already wrapped, add type
-              return this.expr(Object.assign({}, value, {type: transform[key]}), params);
-            }
-            return this.expr({$: value, type: transform[key]}, params);
-          } else
-          if (typeof transform[key] === 'function') { // function = wrapper function
-            return this.expr(transform[key](value, v, result.length, rows), params);
-          }
-        }
-
-        if (value && typeof value === 'object' && '$' in value) { // Already wrapped
-          return this.expr(value, params);
-        }
-        return this.expr({$: value}, params);
-      }).join(',') + ')');
-    }
-    if (!result.length) {
-      return { values: '(SELECT NULL WHERE 1=0)', firstRow };
-    }
-    return { values: `(${fields.map(field => this.id(field)).join(',')}) VALUES ${result.join(',')}`, firstRow };
-  }
-
-  conflict(conflict, table, params) {
-    if (typeof conflict === 'string' || !conflict) {
-      return conflict;
-    }
-    return Object.keys(conflict).map((key) => {
-      const field = this.id(key);
-      const value = conflict[key];
-      const exclId = isPostgres(this.sql) ?
-        `EXCLUDED.${field}` : 
-        `VALUES(${field})`;
-      if (value instanceof RegExp) {
-        switch (value.source.toLowerCase()) {
-          case 'update': return `${field} = ${exclId}`;
-          case 'fill':   return `${field} = COALESCE(${table}.${field}, ${exclId})`;
-          case 'inc':    return `${field} = ${table}.${field} + 1`;
-          case 'dec':    return `${field} = ${table}.${field} - 1`;
-          case 'add':    return `${field} = ${table}.${field} + ${exclId}`;
-          case 'sub':    return `${field} = ${table}.${field} - ${exclId}`;
-          case 'max':    return `${field} = GREATEST(${table}.${field}, ${exclId})`;
-          case 'min':    return `${field} = LEAST(${table}.${field}, ${exclId})`;
-          default: throw new Error(`Unknown conflict rule: ${value.source}`);
-        }
-      } else {
-        return `${field} = ${this.expr(value, params)}`;
-      }
-    }).join(',');
-  }
-
-  select(table, where, { fields = '*', distinct, group, having, order = '', limit, offset } = {}) {
-    const params = [];
-    return new Query(this.sql, `SELECT ${
-      distinct ? 'DISTINCT' + (distinct === true ? '' : ' ON (' + this.exprs(distinct, params) + ')') + ' ' : ''
-    }${
-      this.fields(fields, params)
-    }${
-      table.length ? ' FROM ' + this.table(table, params) : ''
-    }${
-      where ? ' WHERE ' + this.where(where, params) : ''
-    }${
-      group ? ' GROUP BY ' + this.exprs(group, params) : ''
-    }${
-      having ? ' HAVING ' + this.where(having, params) : ''
-    }${
-      order ? ' ORDER BY ' + this.order(order, params) : ''
-    }${
-      limit ? ' LIMIT ' + this.value(limit, params) : ''
-    }${
-      offset ? ' OFFSET ' + this.value(offset, params) : ''
-    }`, params);
+    parts.fields(fields);
+    table.length && parts.append(' FROM ').table(table);
+    where && parts.append(' WHERE ').where(where);
+    group && parts.append(' GROUP BY ').exprs(group);
+    having && parts.append(' HAVING ').where(having);
+    order && parts.append(' ORDER BY ').order(order);
+    limit && parts.append(' LIMIT ').value(limit);
+    offset && parts.append(' OFFSET ').value(offset);
+    return new Query(parts);
   }
 
   update(table, updates, where, { transform } = {}) {
-    const params = [];
-    return new Query(this.sql, `UPDATE ${
-      this.table(table, params)
-    } SET ${
-      this.updates(updates, transform, params)
-    }${
-      where ? ' WHERE ' + this.where(where, params) : ''
-    }`, params);
+    const parts = new QueryParts(this.sql, 'UPDATE ');
+    parts.table(table);
+    parts.append(' SET ').updates(updates, transform);
+    where && parts.append(' WHERE ').where(where);
+    return new Query(this.sql, parts);
   }
 
   insert(table, rows, { fields, transform, unique, conflict, returnId } = {}) {
@@ -670,52 +766,42 @@ class Builder {
     if (!unique && conflict !== undefined && isPostgres(this.sql)) {
       throw new Error(`Specifying "conflict" on Postgres requires also specifying "unique" fields (constraints)`);
     }
+    
 
-    const params = [];
-    table = this.table(table, params);
-
-    const { values, firstRow } = this.rows(rows, fields, transform, params);
+    const parts = new QueryParts(this.sql, 'INSERT ');
+    if (isMySQL(this.sql) && conflict === false) {
+      parts.append('IGNORE ');
+    }
+    parts.append('INTO ').table(table);
+    const firstRow = this.rows(rows, fields, transform);
 
     if (unique && Array.isArray(unique)) {
-      unique = unique.map(field => this.id(field)).join(',');
+      unique = unique.map(field => this.ident(field)).join(',');
     }
-
     if (isMySQL(this.sql)) {
       if (conflict) {
-        conflict = ` ON DUPLICATE KEY UPDATE ${this.conflict(conflict, table, params)}`;
+        parts.append(' ON DUPLICATE KEY UPDATE ').conflict(conflict, table);
       }
     } else
     if (isPostgres(this.sql)) {
       if (unique) {
         if (conflict) {
-          conflict = ` ON CONFLICT (${unique}) DO UPDATE SET ${this.conflict(conflict, table, params)}`;
+          parts.append(` ON CONFLICT (${unique}) DO UPDATE SET `).conflict(conflict, table);
         } else {
-          conflict = ` ON CONFLICT (${unique}) DO NOTHING`;
+          parts.append(` ON CONFLICT (${unique}) DO NOTHING`);
         }
       }
     }
-  
-    return new Query(this.sql,
-      `INSERT${
-        conflict === false ? ' IGNORE' : ''
-      } INTO ${
-        table
-      }${
-        values
-      }${
-        conflict || ''
-      }${
-        returnId && isPostgres(this.sql) ? ' RETURNING ' + (returnId === true ? 'id' : returnId) : ''
-      }`, params, { firstRow });
+
+    returnId && isPostgres(this.sql) && parts.append(` RETURNING ${this.ident(returnId === true ? 'id' : returnId)}`);
+    return new Query(parts, { firstRow });
   }
 
   delete(table, where) {
-    const params = [];
-    return new Query(this.sql, `DELETE FROM ${
-      this.table(table, params)
-    }${
-      where ? ' WHERE ' + this.where(where, params) : ''
-    }`, params);
+    const parts = new QueryParts(this.sql, 'DELETE FROM ');
+    parts.table(table);
+    where && parts.append(' WHERE ').where(where);
+    return new Query(parts);
   }
 }
 
@@ -789,11 +875,11 @@ class SQL extends Function {
         if (prop in target) {
           return target[prop];
         }
-        return new Tables(target, target.$builder.tableCase(prop));
+        return new Tables(target, prop);
       },
       apply(target, thisArg, argumentsList) {
         const params = [];
-        return new Query(target, argumentsList[0].map((chunk, i, chunks) => {
+        return new Query(new QueryParts(target, argumentsList[0].map((chunk, i, chunks) => {
           if (i === chunks.length - 1) {
             return chunk;
           }
@@ -813,11 +899,11 @@ class SQL extends Function {
                 return '$' + params.length;
               }).join(',') + ')');
             };
-            return chunk + `(${fields.map(field => target.$builder.id(field)).join(',')}) VALUES ${values.join(',')}`;
+            return chunk + `(${fields.map(field => target.$builder.ident(field)).join(',')}) VALUES ${values.join(',')}`;
           }
           params.push(arg);
           return chunk + '$' + (i + 1);
-        }).join(''), params);
+        }).join(''), params));
       },
     });
   }
@@ -862,7 +948,7 @@ class SQL extends Function {
 
   // Alternative to simply accessing db.tableName
   from(table) {
-    return new Tables(this, this.$builder.tableCase(table));
+    return new Tables(this, table);
   }
 
   // Join multiple tables

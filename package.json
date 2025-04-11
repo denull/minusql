@@ -1,6 +1,6 @@
 {
   "name": "minusql",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "A minimalistic ORM for MySQL and Postgres",
   "keywords": [
     "sql",
@@ -23,6 +23,6 @@
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test"
   }
 }
