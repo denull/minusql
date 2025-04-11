@@ -205,7 +205,7 @@ class QueryParts {
 
     return {
       pattern,
-      append: (lhs, params, inVar) =>
+      append: (lhs, inVar) =>
         this.append(`${this.ident(lhs)} REGEXP `).value(pattern, inVar).append(isCaseSensitive ? '' : ' COLLATE utf8_general_ci'),
     }
   }
@@ -272,7 +272,7 @@ class QueryParts {
         if (BinaryOperators.includes(fn)) {
           checkArity(2);
         }
-        return this.append('(').append(e, this.expr, ` ${fn} `).append(q, ')');
+        return this.append('(').append(e, this.expr, ` ${fn} `).append(')');
       }
   
       switch (fn) {
@@ -283,12 +283,12 @@ class QueryParts {
           this.expr(e[0])
             .append(fn === 'IN' ? ' IN (' : ' NOT IN (');
           if (isVar(e[1])) {
-            return this.value(e[1]).append(q, ')');
+            return this.value(e[1]).append(')');
           }
           if (!Array.isArray(e[1])) {
             throw new Error(`"${fn}" should take array as its second argument, ${typeof e[1]} supplied`);
           }
-          return this.append(e[1], this.expr, ',').append(q, ')');
+          return this.append(e[1], this.expr, ',').append(')');
         case 'IS NULL':
         case 'IS NOT NULL':
           checkArity(1);
@@ -374,13 +374,13 @@ class QueryParts {
         this.chunks.push(...t.table.chunks.slice(1));
         this.append(')');
       } else {
-        this.append(this.ident(table));
+        this.append(this.ident(t.table));
       }
       if (t.as) {
         this.append(` AS ${this.ident(t.as)}`);
       }
       if (t.on) {
-        this.append(' ON ').where(q, t.on);
+        this.append(' ON ').where(t.on);
       }
     }, ' ');
   }
@@ -392,7 +392,7 @@ class QueryParts {
     if (Array.isArray(fields)) {
       return this.append(fields, (field) => this.append(this.ident(field)), ',');
     }
-    return this.append(Object.keys(fields), (q, field) => {
+    return this.append(Object.keys(fields), (field) => {
       if (fields[field] === true) {
         return this.append(this.ident(field));
       }
@@ -485,8 +485,8 @@ class QueryParts {
     }
 
     this.append('(')
-      .append(fields, (field) => this.ident(field), ',')
-      .append(') VALUES (')
+      .append(fields, (field) => this.append(this.ident(field)), ',')
+      .append(') VALUES ')
       .append(rows, (row, i) =>
         this.append('(')
           .append(fields, (key) => {
@@ -508,7 +508,7 @@ class QueryParts {
                 return this.expr({$: value, type: transform[key]});
               } else
               if (typeof transform[key] === 'function') { // function = wrapper function
-                return this.expr(transform[key](value, row, result.length, rows));
+                return this.expr(transform[key](value, row, i, rows));
               }
             }
             if (value && typeof value === 'object' && '$' in value) { // Already wrapped
@@ -545,7 +545,7 @@ class QueryParts {
           default: throw new Error(`Unknown conflict rule: ${value.source}`);
         }
       } else {
-        return this.append(`${field}=`).expr(value, params);
+        return this.append(`${field}=`).expr(value);
       }
     }, ',');
   }
@@ -730,6 +730,14 @@ class Builder {
     this.sql = sql;
   }
 
+  ident(ident) {
+    if (ident === '*') return '*';
+    if (this.sql.$config.convertCase) {
+      ident = toSnakeCase(ident);
+    }
+    return isMySQL(this.sql) ? escapeMysqlIdent(ident) : escapePostgresIdent(ident); 
+  }
+
   select(table, where, { fields = '*', distinct, group, having, order, limit, offset } = {}) {
     const parts = new QueryParts(this.sql, 'SELECT ');
     if (distinct) {
@@ -773,10 +781,10 @@ class Builder {
       parts.append('IGNORE ');
     }
     parts.append('INTO ').table(table);
-    const firstRow = this.rows(rows, fields, transform);
+    const firstRow = parts.rows(rows, fields, transform);
 
     if (unique && Array.isArray(unique)) {
-      unique = unique.map(field => this.ident(field)).join(',');
+      unique = unique.map(field => parts.ident(field)).join(',');
     }
     if (isMySQL(this.sql)) {
       if (conflict) {
@@ -918,6 +926,7 @@ class SQL extends Function {
       params = query.params;
       query = query.text;
     }
+    console.log(query, params);
     return new Promise(async (resolve, reject) => {
       const convertResults = (results) => {
         if (!Array.isArray(results)) { // MySQL behavior is a bit inconsistent with everything else
