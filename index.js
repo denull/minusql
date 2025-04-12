@@ -353,7 +353,7 @@ class QueryParts {
         if (v && typeof v === 'object' && '$' in v && v.$ instanceof RegExp) {
           return this.regexp(v.$).append(k, true);
         }
-        return this.append(`${this.ident(k)} = `).value(v);
+        return this.append(`${this.ident(k)}=`).value(v);
       }, ' AND ');
     }
 
@@ -412,7 +412,9 @@ class QueryParts {
       return this.append(exprs);
     }
     if (Array.isArray(exprs)) {
-      return this.append(exprs, (e) => (typeof e === 'string') ? this.append(e) : this.expr(e), ',');
+      return this.append(exprs, (e) => typeof e === 'string' ?
+        this.append(this.ident(e)) :
+        this.expr(e), ',');
     }
     return this.expr(exprs);
   }
@@ -422,8 +424,8 @@ class QueryParts {
       return this.append(exprs);
     }
     if (Array.isArray(exprs)) {
-      return this.append(exprs, (e) => (typeof e === 'string') ?
-        this.append(e) :
+      return this.append(exprs, (e) => typeof e === 'string' ?
+        this.append(this.ident(e)) :
         this.expr(e[0]).append(e[1] ? ` ${this.keyword(e[1])}` : ''), ',');
     }
     return this.expr(exprs);
@@ -435,11 +437,10 @@ class QueryParts {
     }
     return this.append(Object.keys(updates), (key) => {
       this.append(`${this.ident(key)}=`);
-      if (typeof transform === 'function') {
-        return this.expr(transform(key, updates));
-      }
-      
       const value = updates[key];
+      if (typeof transform === 'function') {
+        return this.expr(transform(value, key, updates));
+      }
       if (transform === false) { // do not wrap any values at all
         return this.expr(value);
       } else
@@ -454,7 +455,7 @@ class QueryParts {
           return this.expr({$: value, type: transform[key]});
         } else
         if (typeof transform[key] === 'function') { // function = wrapper function
-          return this.expr(transform[key](value, updates));
+          return this.expr(transform[key](value, key, updates));
         }
       }
 
@@ -470,6 +471,9 @@ class QueryParts {
       rows = Array(rows);
     } else
     if (typeof rows === 'function') {
+      rows = [...rows()];
+    } else
+    if (Object.prototype.toString.call(rows) === '[object Generator]') {
       rows = [...rows];
     } else
     if (!Array.isArray(rows)) {
@@ -490,10 +494,10 @@ class QueryParts {
       .append(rows, (row, i) =>
         this.append('(')
           .append(fields, (key) => {
+            const value = row ? row[key] : null;
             if (typeof transform === 'function') {
-              return this.value(transform(key, row, i, rows));
+              return this.value(transform(value, i, key, row, rows));
             }
-            const value = row[key];
             if (transform === false) { // do not wrap any values at all
               return this.expr(value);
             } else
@@ -508,7 +512,7 @@ class QueryParts {
                 return this.expr({$: value, type: transform[key]});
               } else
               if (typeof transform[key] === 'function') { // function = wrapper function
-                return this.expr(transform[key](value, row, i, rows));
+                return this.expr(transform[key](value, i, key, row, rows));
               }
             }
             if (value && typeof value === 'object' && '$' in value) { // Already wrapped
@@ -528,6 +532,7 @@ class QueryParts {
     if (typeof conflict === 'string') {
       return this.append(conflict);
     }
+    table = this.ident(table);
     return this.append(Object.keys(conflict), (key) => {
       const field = this.ident(key);
       const exclId = isPostgres(this.sql) ? `EXCLUDED.${field}` : `VALUES(${field})`;
@@ -763,7 +768,7 @@ class Builder {
     parts.table(table);
     parts.append(' SET ').updates(updates, transform);
     where && parts.append(' WHERE ').where(where);
-    return new Query(this.sql, parts);
+    return new Query(parts);
   }
 
   insert(table, rows, { fields, transform, unique, conflict, returnId } = {}) {
