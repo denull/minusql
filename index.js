@@ -360,13 +360,14 @@ class QueryParts {
     return this.value(e);
   }
 
-  table(tables) {
-    return this.append(tables, (t, i) => {
+  table(tables, { using = false } = {}) {
+    const conditions = [];
+    this.append(tables, (t, i) => {
       if (typeof t === 'string') {
-        return this.append(`${i > 0 ? 'LEFT JOIN ' : ''}${this.ident(t)}`);
+        return this.append(`${i > 0 ? (using ? ' USING ' : 'LEFT JOIN ') : ''}${this.ident(t)}`);
       }
       if (i > 0) {
-        this.append((t.join || 'LEFT') + ' JOIN ');
+        this.append(using ? (i > 1 ? ',' : ' USING ') : ((t.join || 'LEFT') + ' JOIN '));
       }
       if (t.table instanceof Query) {
         this.append('(' + t.table.chunks[0]);
@@ -380,9 +381,14 @@ class QueryParts {
         this.append(` AS ${this.ident(t.as)}`);
       }
       if (t.on) {
-        this.append(' ON ').where(t.on);
+        if (using) {
+          conditions.push(t.on);
+        } else {
+          this.append(' ON ').where(t.on);
+        }
       }
-    }, ' ');
+    }, using ? '' : ' ');
+    return conditions;
   }
 
   fields(fields) {
@@ -811,8 +817,16 @@ class Builder {
 
   delete(table, where) {
     const parts = new QueryParts(this.sql, 'DELETE FROM ');
-    parts.table(table);
-    where && parts.append(' WHERE ').where(where);
+    const conditions = parts.table(table, { using: isPostgres(this.sql) });
+    if (!conditions.length && where) {
+      parts.append(' WHERE ').where(where);
+    } else
+    if (conditions.length) {
+      conditions.unshift('and');
+      where && conditions.push(where);
+      console.log(conditions);
+      parts.append(' WHERE ').where(conditions);
+    }
     return new Query(parts);
   }
 }
