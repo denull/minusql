@@ -1,6 +1,6 @@
 {
   "name": "minusql",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "A minimalistic ORM for MySQL and Postgres",
   "keywords": [
     "sql",

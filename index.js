@@ -824,7 +824,6 @@ class Builder {
     if (conditions.length) {
       conditions.unshift('and');
       where && conditions.push(where);
-      console.log(conditions);
       parts.append(' WHERE ').where(conditions);
     }
     return new Query(parts);

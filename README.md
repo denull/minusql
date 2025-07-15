@@ -80,7 +80,7 @@ To perform raw queries, use `db.exec(query, params)`.
 To perform CRUD operations on a table, use one of the following methods:
 - `db.table.select(where?, options?)`
 - `db.table.insert(rows, options?)`
-- `db.table.update(update, where?)`
+- `db.table.update(update, where?, options?)`
 - `db.table.delete(where?)`
 
 All of these methods return a `Query` object, which will be executed as soon as you `await` it (or call `exec()` on it). You can also use the Query object to inspect the built query (the `text` field) or call `explain()` to construct an EXPLAIN query from it.
