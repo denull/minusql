@@ -84,6 +84,22 @@ function isPostgres(sql) {
   return sql.$config.flavor === 'postgres';
 }
 
+function rowsToArray(rows) {
+  if (typeof rows === 'number') {
+    return Array(rows);
+  }
+  if (typeof rows === 'function') {
+    return [...rows()];
+  }
+  if (Object.prototype.toString.call(rows) === '[object Generator]') {
+    return [...rows];
+  }
+  if (!Array.isArray(rows)) {
+    return [rows];
+  }
+  return rows;
+}
+
 const MaybeUnaryOperators = [
   '-', '~', '#', '@@', '@-@', '?-', '!!', ':', '|/', '||/', '@', '%',
 ];
@@ -391,12 +407,12 @@ class QueryParts {
     return conditions;
   }
 
-  fields(fields) {
+  fields(fields, prefix = '') {
     if (typeof fields === 'string') {
       return this.append(fields);
     }
     if (Array.isArray(fields)) {
-      return this.append(fields, (field) => this.append(this.ident(field)), ',');
+      return this.append(fields, (field) => this.append(prefix + this.ident(field)), ',');
     }
     return this.append(Object.keys(fields), (field) => {
       if (fields[field] === true) {
@@ -472,31 +488,8 @@ class QueryParts {
     }, ',');
   }
 
-  rows(rows, fields, transform) {
-    if (typeof rows === 'number') {
-      rows = Array(rows);
-    } else
-    if (typeof rows === 'function') {
-      rows = [...rows()];
-    } else
-    if (Object.prototype.toString.call(rows) === '[object Generator]') {
-      rows = [...rows];
-    } else
-    if (!Array.isArray(rows)) {
-      rows = [rows];
-    }
-
-    if (!rows.length) {
-      this.append('(SELECT NULL WHERE 1=0)');
-      return null;
-    }
-    if (!fields) {
-      fields = Object.keys(rows[0]);
-    }
-
-    this.append('(')
-      .append(fields, (field) => this.append(this.ident(field)), ',')
-      .append(') VALUES ')
+  values(rows, fields, transform) {
+    return this.append('VALUES ')
       .append(rows, (row, i) =>
         this.append('(')
           .append(fields, (key) => {
@@ -528,7 +521,14 @@ class QueryParts {
           }, ',')
           .append(')'),
       ',');
-    return rows[0];
+  }
+
+  rows(rows, fields, transform) {
+    if (!rows.length) {
+      this.append('(SELECT NULL WHERE 1=0)');
+      return null;
+    }
+    this.append('(').fields(fields).append(') ').values(rows, fields, transform);
   }
 
   conflict(conflict, table) {
@@ -551,8 +551,10 @@ class QueryParts {
           case 'dec':    return this.append(`${field}=${table}.${field}-1`);
           case 'add':    return this.append(`${field}=${table}.${field}+${exclId}`);
           case 'sub':    return this.append(`${field}=${table}.${field}-${exclId}`);
-          case 'max':    return this.append(`${field}=GREATEST(${table}.${field}, ${exclId})`);
-          case 'min':    return this.append(`${field}=LEAST(${table}.${field}, ${exclId})`);
+          case 'max':    return this.append(`${field}=GREATEST(${table}.${field},${exclId})`);
+          case 'min':    return this.append(`${field}=LEAST(${table}.${field},${exclId})`);
+          case 'and':    return this.append(`${field}=${table}.${field}&${exclId}`);
+          case 'or':     return this.append(`${field}=${table}.${field}|${exclId}`);
           default: throw new Error(`Unknown conflict rule: ${value.source}`);
         }
       } else {
@@ -791,7 +793,12 @@ class Builder {
       parts.append('IGNORE ');
     }
     parts.append('INTO ').table(table);
-    const firstRow = parts.rows(rows, fields, transform);
+
+    rows = rowsToArray(rows);
+    if (!fields) {
+      fields = rows.length ? Object.keys(rows[0]) : [];
+    }
+    parts.rows(rows, fields, transform);
 
     if (unique && Array.isArray(unique)) {
       unique = unique.map(field => parts.ident(field)).join(',');
@@ -812,7 +819,37 @@ class Builder {
     }
 
     returnId && isPostgres(this.sql) && parts.append(` RETURNING ${this.ident(returnId === true ? 'id' : returnId)}`);
-    return new Query(parts, { firstRow });
+    return new Query(parts, { firstRow: rows[0] || null });
+  }
+
+  merge(table, rows, { fields, transform, unique, conflict, returnId } = {}) {
+    if (!isPostgres(this.sql)) {
+      throw new Error('MERGE is supported only on Postgres');
+    }
+
+    rows = rowsToArray(rows);
+    if (!fields) {
+      fields = rows.length ? Object.keys(rows[0]) : [];
+    }
+
+    const parts = new QueryParts(this.sql, 'MERGE INTO ');
+    if (unique && Array.isArray(unique)) {
+      unique = unique.map(field => parts.ident(table) + '.' + parts.ident(field) + '=EXCLUDED.' + parts.ident(field)).join(' AND ');
+    }
+    parts.table(table);
+    parts.append(' USING (').values(rows, fields, transform).append(') AS EXCLUDED (').fields(fields).append(')');
+    parts.append(` ON ${unique}`);
+    if (conflict) {
+      parts.append(` WHEN MATCHED THEN UPDATE SET `).conflict(conflict, table);
+    } else {
+      parts.append(` WHEN MATCHED THEN DO NOTHING`);
+    }
+    parts.append(' WHEN NOT MATCHED THEN INSERT (')
+      .fields(fields)
+    .append(') VALUES (').fields(fields, 'EXCLUDED.').append(')');
+
+    returnId && parts.append(` RETURNING ${this.ident(returnId === true ? '*' : returnId)}`);
+    return new Query(parts, { firstRow: rows[0] || null });
   }
 
   delete(table, where) {
@@ -870,6 +907,10 @@ class Tables {
 
   insert(rows, options = {}) {
     return this.sql.$builder.insert(this.list, rows, options);
+  }
+
+  merge(rows, options = {}) {
+    return this.sql.$builder.merge(this.list, rows, options);
   }
 
   delete(where) {
