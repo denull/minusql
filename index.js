@@ -162,11 +162,13 @@ class QueryParts {
   }
 
   ident(ident) {
-    if (ident === '*') return '*';
-    if (this.sql.$config.convertCase) {
-      ident = toSnakeCase(ident);
-    }
-    return isMySQL(this.sql) ? escapeMysqlIdent(ident) : escapePostgresIdent(ident); 
+    return ident.split('.').map(part => {
+      if (part === '*') return '*';
+      if (this.sql.$config.convertCase) {
+        part = toSnakeCase(part);
+      }
+      return isMySQL(this.sql) ? escapeMysqlIdent(part) : escapePostgresIdent(part); 
+    }).join('.');
   }
 
   keyword(name) {
