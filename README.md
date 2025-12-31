@@ -143,9 +143,13 @@ There are a few special behaviors for specific SQL operators:
 - `['cast', Symbol('x'), 'json']` is converted to `"x"::json` (the type is NOT escaped)
 - `['extract', Symbol('x'), 'month']` is converted to `EXTRACT(month FROM x)` (note the order change; also the last argument is NOT escaped)
 - `['case', [cond1, then1], [cond2, then2], [default]]` is converted to `CASE WHEN cond1 THEN then1 WHEN cond2 THEN then2 ELSE default END`
+- `['filter', cond]` is converted to `FILTER (WHERE cond)`
 
 Supported options are (all optional):
-- `fields`: a raw string or an array of columns to select
+- `fields`: a list of fields to select
+  - if `fields` is a string, it's inserted as is, **without any escaping** (not recommended)
+  - if `fields` is an array, each element is treated as a column name
+  - if `fields` is an object, keys with `true` values are treated as column names, and all other values are treated as expressions and converted to `expr AS key` statements
 - `group`: a raw string or an array of expressions to use in the `GROUP BY` clause
 - `having`: a raw string or structured condition to use in the `HAVING` clause
 - `order`: a raw string or an array of pairs [expression, 'ASC' | 'DESC'] to use in the `ORDER BY` clause

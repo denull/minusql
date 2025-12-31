@@ -517,7 +517,7 @@ class QueryParts {
                 return this.expr(transform[key](value, i, key, row, rows));
               }
             }
-            if (value && typeof value === 'object' && '$' in value) { // Already wrapped
+            if (value && (Array.isArray(value) || (typeof value === 'object' && '$' in value))) { // Already wrapped
               return this.expr(value);
             }
             return this.expr({$: value});
@@ -775,6 +775,9 @@ class Builder {
   }
 
   update(table, updates, where, { transform } = {}) {
+    if (transform === undefined && this.sql.$config.transform !== undefined) {
+      transform = this.sql.$config.transform;
+    }
     const parts = new QueryParts(this.sql, 'UPDATE ');
     parts.table(table);
     parts.append(' SET ').updates(updates, transform);
@@ -789,7 +792,9 @@ class Builder {
     if (!unique && conflict !== undefined && isPostgres(this.sql)) {
       throw new Error(`Specifying "conflict" on Postgres requires also specifying "unique" fields (constraints)`);
     }
-    
+    if (transform === undefined && this.sql.$config.transform !== undefined) {
+      transform = this.sql.$config.transform;
+    }
 
     const parts = new QueryParts(this.sql, 'INSERT ');
     if (isMySQL(this.sql) && conflict === false) {
@@ -828,6 +833,9 @@ class Builder {
   merge(table, rows, { fields, transform, unique, conflict, returnId } = {}) {
     if (!isPostgres(this.sql)) {
       throw new Error('MERGE is supported only on Postgres');
+    }
+    if (transform === undefined && this.sql.$config.transform !== undefined) {
+      transform = this.sql.$config.transform;
     }
 
     rows = rowsToArray(rows);
