@@ -162,7 +162,7 @@ class QueryParts {
   }
 
   ident(ident) {
-    return ident.split('.').map(part => {
+    return (ident + '').split('.').map(part => {
       if (part === '*') return '*';
       if (this.sql.$config.convertCase) {
         part = toSnakeCase(part);
