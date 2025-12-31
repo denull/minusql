@@ -205,6 +205,11 @@ await db.users.insert({
 `insert` accepts two parameters: rows to insert (or a single row) and options.
 
 Supported options:
+- `transform`: describes transformations to be applied to fields before insert:
+  - `false`: do not apply any transformations
+  - function: apply specified function to each field with `(value, key, updates)` as arguments
+  - object: each key describes how corresponding field should be transformed (`false` and functions treates as above, strings are used to cast values to specified type)
+  - otherwise, fields with simple values are wrapped in `{$: value}`, and object/arrays are left as is
 - `fields`: an array of columns; if omitted, the first element's keys will be used
 - `unique` (PostgreSQL only): for upserts, you need to specify a list of unique fields
 - `conflict`: for upserts, describes the conflict resolution strategy (see below)
@@ -221,6 +226,8 @@ For convenience, you can pass the following predefined RegExp patterns as aliase
 - `/sub/`: subtract new value from the old one
 - `/max/`: select the maximum out of old value and the new one
 - `/min/`: select the minimum out of old value and the new one
+
+Postgres also support `merge` queries (the syntax is the same as in inserts).
 
 #### UPDATE Queries
 
@@ -256,9 +263,10 @@ await db.users.update(
 );
 ```
 
-The `update(update, where?)` method takes two parameters:
+The `update(update, where?, options?)` method takes three parameters:
 1. `update`: An object where keys are column names and values are either direct values or expressions
 2. `where`: A condition to determine which rows to update (same format as in `select`); if `null`, all rows will be updated
+3. `options`: The only supported option is `transform` (see `insert` above)
 
 The update values can be:
 - Simple values (strings, numbers, booleans, etc.)
