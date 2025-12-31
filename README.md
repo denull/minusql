@@ -143,7 +143,7 @@ There are a few special behaviors for specific SQL operators:
 - `['cast', Symbol('x'), 'json']` is converted to `"x"::json` (the type is NOT escaped)
 - `['extract', Symbol('x'), 'month']` is converted to `EXTRACT(month FROM x)` (note the order change; also the last argument is NOT escaped)
 - `['case', [cond1, then1], [cond2, then2], [default]]` is converted to `CASE WHEN cond1 THEN then1 WHEN cond2 THEN then2 ELSE default END`
-- `['filter', cond]` is converted to `FILTER (WHERE cond)`
+- `['filter', expr, cond]` is converted to `expr FILTER (WHERE cond)`
 
 Supported options are (all optional):
 - `fields`: a list of fields to select

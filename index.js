@@ -329,8 +329,8 @@ class QueryParts {
           checkArity(2);
           return this.append(`EXTRACT(${this.keyword(e[1])} FROM `).expr(e[0]).append(')');
         case 'FILTER':
-          checkArity(1);
-          return this.append(`FILTER (WHERE `).expr(e[0]).append(`)`);
+          checkArity(2);
+          return this.expr(e[0]).append(` FILTER (WHERE `).expr(e[1]).append(`)`);
         case 'CASE':
           return this.append('CASE ')
             .append((cond, i) => {
