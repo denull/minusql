@@ -1018,8 +1018,12 @@ class SQL extends Function {
           });
           break;
         case 'postgres':
-          const results = (await this.$db.query(query, params)).rows;
-          resolve(convertResults(results));
+          try {
+            const results = (await this.$db.query(query, params)).rows;
+            resolve(convertResults(results));
+          } catch (error) {
+            reject(error);
+          }
           break;
       }
     });
