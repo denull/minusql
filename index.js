@@ -232,9 +232,10 @@ class QueryParts {
     if (isVar(value) || inVar) {
       let v = inVar ? value : value.$;
       let t = inVar ? false : value.type;
-      if (Array.isArray(v)) {
-        return this.append(v, el => this.value(el, true), ',');
-      }
+      // An array binds as a single (array-typed) parameter — e.g. inserting or
+      // updating a Postgres array column. The comma-separated list expansion
+      // that IN(...) needs is handled by the `IN`/`NOT IN` operator itself,
+      // which is the only context that requires it.
       if (v instanceof RegExp) {
         v = this.regexp(v, true).pattern;
       }
@@ -301,6 +302,12 @@ class QueryParts {
           this.expr(e[0])
             .append(fn === 'IN' ? ' IN (' : ' NOT IN (');
           if (isVar(e[1])) {
+            // Expand a wrapped array `{$: [...]}` into a parameter list here;
+            // value() now binds arrays as a single (array-typed) parameter.
+            const list = e[1].$;
+            if (Array.isArray(list)) {
+              return this.append(list, el => this.value(el, true), ',').append(')');
+            }
             return this.value(e[1]).append(')');
           }
           if (!Array.isArray(e[1])) {
