@@ -142,8 +142,11 @@ There are a few special behaviors for specific SQL operators:
 - `['type', Symbol('x'), 'json']` is converted to `json "x"` (the type is NOT escaped)
 - `['cast', Symbol('x'), 'json']` is converted to `"x"::json` (the type is NOT escaped)
 - `['extract', Symbol('x'), 'month']` is converted to `EXTRACT(month FROM x)` (note the order change; also the last argument is NOT escaped)
-- `['case', [cond1, then1], [cond2, then2], [default]]` is converted to `CASE WHEN cond1 THEN then1 WHEN cond2 THEN then2 ELSE default END`
+- `['case', [cond1, then1], [cond2, then2], [default]]` is converted to `CASE WHEN cond1 THEN then1 WHEN cond2 THEN then2 ELSE default END`. Every branch is an array: a two-element one is a `WHEN … THEN` pair, a one-element one is the `ELSE` (last) or the subject of a simple `CASE` (first), so `['case', [Symbol('x')], [1, 'one'], ['other']]` becomes `CASE "x" WHEN 1 THEN 'one' ELSE 'other' END`
 - `['filter', expr, cond]` is converted to `expr FILTER (WHERE cond)`
+
+Expressions are never modified while a query is built, so the same condition
+object can be reused — by a paginated query and its `COUNT(*)`, for example.
 
 Supported options are (all optional):
 - `fields`: a list of fields to select
@@ -420,6 +423,17 @@ const results = await db.join([
 const results = await db.users
   .join('profiles p', { 'users.id': Symbol('p.userId') })
   .selectAll();
+
+// `table` also accepts another query, joined as a subquery — its own
+// parameters keep their place in the numbering
+const totals = db.orders.select({ status: {$: 'paid'} }, {
+  fields: { userId: true, total: ['sum', Symbol('amount')] },
+  group: 'user_id',
+});
+const results = await db.join([
+  { table: 'users' },
+  { table: totals, as: 't', join: 'INNER', on: { 't.userId': Symbol('users.id') } },
+]).selectAll();
 ```
 
 To join multiple tables, call `db.join` with the array of objects containing following fields:

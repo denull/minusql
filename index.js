@@ -278,90 +278,94 @@ class QueryParts {
       if (typeof e[0] !== 'string') {
         throw new Error(`First element of array-style expression must a function/operator name, got "${e[0]}" instead`);
       }
-      const fn = e.shift().toUpperCase();
+      const fn = e[0].toUpperCase();
+      const args = e.slice(1);
       function checkArity(n) {
-        if (e.length != n) throw new Error(`"${fn}" requires exactly ${n} operands (${e.length} supplied)`);
+        if (args.length != n) throw new Error(`"${fn}" requires exactly ${n} operands (${args.length} supplied)`);
       }
-  
+
       // Operators
-      if (MaybeUnaryOperators.includes(fn) && (e.length === 1)) {
-        return this.append(fn + ' ').expr(e[0]);
+      if (MaybeUnaryOperators.includes(fn) && (args.length === 1)) {
+        return this.append(fn + ' ').expr(args[0]);
       }
       if (Operators.includes(fn)) {
         if (BinaryOperators.includes(fn)) {
           checkArity(2);
         }
-        return this.append('(').append(e, this.expr, ` ${fn} `).append(')');
+        return this.append('(').append(args, this.expr, ` ${fn} `).append(')');
       }
-  
+
       switch (fn) {
         case 'IN':
         case 'NOTIN':
         case 'NOT IN':
           checkArity(2);
-          this.expr(e[0])
+          this.expr(args[0])
             .append(fn === 'IN' ? ' IN (' : ' NOT IN (');
-          if (isVar(e[1])) {
+          if (isVar(args[1])) {
             // Expand a wrapped array `{$: [...]}` into a parameter list here;
             // value() now binds arrays as a single (array-typed) parameter.
-            const list = e[1].$;
+            const list = args[1].$;
             if (Array.isArray(list)) {
               return this.append(list, el => this.value(el, true), ',').append(')');
             }
-            return this.value(e[1]).append(')');
+            return this.value(args[1]).append(')');
           }
-          if (!Array.isArray(e[1])) {
-            throw new Error(`"${fn}" should take array as its second argument, ${typeof e[1]} supplied`);
+          if (!Array.isArray(args[1])) {
+            throw new Error(`"${fn}" should take array as its second argument, ${typeof args[1]} supplied`);
           }
-          return this.append(e[1], this.expr, ',').append(')');
+          return this.append(args[1], this.expr, ',').append(')');
         case 'IS NULL':
         case 'IS NOT NULL':
           checkArity(1);
-          return this.expr(e[0]).append(` ${fn} `);
+          return this.expr(args[0]).append(` ${fn} `);
         case 'NOT':
           checkArity(1);
-          return this.append(` ${fn} `).expr(e[0]);
+          return this.append(` ${fn} `).expr(args[0]);
         case 'BETWEEN':
         case 'NOT BETWEEN':
           checkArity(3);
-          return this.expr(e[0]).append(` ${fn} `).expr(e[1]).append(' AND ').expr(e[2]);
+          return this.expr(args[0]).append(` ${fn} `).expr(args[1]).append(' AND ').expr(args[2]);
         case 'TYPE':
           checkArity(2);
-          return this.append(this.keyword(e[1]) + ' ').expr(e[0]);
+          return this.append(this.keyword(args[1]) + ' ').expr(args[0]);
         case 'CAST':
           checkArity(2);
           if (isPostgres(this.sql)) {
-            return this.expr(e[0]).append(`::${this.keyword(e[1])}`);
+            return this.expr(args[0]).append(`::${this.keyword(args[1])}`);
           }
-          return this.append('CAST(').expr(e[0]).append(` AS ${this.keyword(e[1])})`);
+          return this.append('CAST(').expr(args[0]).append(` AS ${this.keyword(args[1])})`);
         case 'EXTRACT':
           checkArity(2);
-          return this.append(`EXTRACT(${this.keyword(e[1])} FROM `).expr(e[0]).append(')');
+          return this.append(`EXTRACT(${this.keyword(args[1])} FROM `).expr(args[0]).append(')');
         case 'FILTER':
           checkArity(2);
-          return this.expr(e[0]).append(` FILTER (WHERE `).expr(e[1]).append(`)`);
+          return this.expr(args[0]).append(` FILTER (WHERE `).expr(args[1]).append(`)`);
         case 'CASE':
           return this.append('CASE ')
-            .append((cond, i) => {
-              if (cond.length > 1) {
+            .append(args, (branch, i) => {
+              if (!Array.isArray(branch) || branch.length === 0) {
+                throw new Error('Each CASE branch should be a non-empty array');
+              }
+              if (branch.length > 1) {
                 return this.append('WHEN ')
-                  .expr(cond[0])
+                  .expr(branch[0])
                   .append(' THEN ')
-                  .expr(cond[1]);
+                  .expr(branch[1]);
               }
               if (i === 0) {
-                return this.expr(cond[0]);
+                return this.expr(branch[0]);
               }
-              if (i === e.length - 1) {
+              if (i === args.length - 1) {
                 return this.append('ELSE ')
-                  .expr(cond[0]);
+                  .expr(branch[0]);
               }
               throw new Error('Invalid case format');
             }, ' ')
             .append(' END');
         default:
           return this.append(`${this.keyword(fn)}(`)
-            .append(e, this.expr, ',')
+            .append(args, this.expr, ',')
             .append(')');
       }
     }
@@ -398,9 +402,10 @@ class QueryParts {
         this.append(using ? (i > 1 ? ',' : ' USING ') : ((t.join || 'LEFT') + ' JOIN '));
       }
       if (t.table instanceof Query) {
-        this.append('(' + t.table.chunks[0]);
-        this.params.push(...t.table.params);
-        this.chunks.push(...t.table.chunks.slice(1));
+        const sub = t.table.parts;
+        this.append('(' + sub.chunks[0]);
+        this.params.push(...sub.params);
+        this.chunks.push(...sub.chunks.slice(1));
         this.append(')');
       } else {
         this.append(this.ident(t.table));
@@ -493,7 +498,7 @@ class QueryParts {
         }
       }
 
-      if (value && typeof value === 'object' && '$' in value) { // Already wrapped
+      if (value && (Array.isArray(value) || (typeof value === 'object' && '$' in value))) {
         return this.expr(value);
       }
       return this.expr({$: value});
@@ -964,32 +969,33 @@ class SQL extends Function {
         return new Tables(target, prop);
       },
       apply(target, thisArg, argumentsList) {
-        const params = [];
-        return new Query(new QueryParts(target, argumentsList[0].map((chunk, i, chunks) => {
-          if (i === chunks.length - 1) {
-            return chunk;
-          }
-          const arg = argumentsList[i + 1];
+        const [strings, ...values] = argumentsList;
+        const parts = new QueryParts(target, strings[0]);
+        for (let i = 1; i < strings.length; i++) {
+          const arg = values[i - 1];
           if (arg instanceof Values) {
             if (arg.rows.length === 0) {
-              return chunk + '(SELECT NULL WHERE 1=0)'; // Workaround to insert 0 rows
+              parts.append('(SELECT NULL WHERE 1=0)'); // Workaround to insert 0 rows
+            } else {
+              const fields = arg.fields || Object.keys(arg.rows[0]);
+              parts.append(`(${fields.map(field => parts.ident(field)).join(',')}) VALUES `);
+              arg.rows.forEach((row, index) => {
+                parts.append(index ? ',(' : '(');
+                fields.forEach((key, column) => {
+                  if (column) {
+                    parts.append(',');
+                  }
+                  parts.append('', Array.isArray(row) ? row[column] : row[key]);
+                });
+                parts.append(')');
+              });
             }
-            let fields = arg.fields;
-            let values = [];
-            for (const row of arg.rows) {
-              if (!fields) {
-                fields = Object.keys(row);
-              }
-              values.push('(' + fields.map((key, i) => {
-                params.push(Array.isArray(row) ? row[i] : row[key]);
-                return '$' + params.length;
-              }).join(',') + ')');
-            };
-            return chunk + `(${fields.map(field => target.$builder.ident(field)).join(',')}) VALUES ${values.join(',')}`;
+            parts.append(strings[i]);
+          } else {
+            parts.append('', arg, strings[i]);
           }
-          params.push(arg);
-          return chunk + '$' + (i + 1);
-        }).join(''), params));
+        }
+        return new Query(parts);
       },
     });
   }
@@ -1057,7 +1063,9 @@ class SQL extends Function {
       await tx.exec('ROLLBACK');
       throw err;
     } finally {
-      tx.db.release();
+      if (typeof tx.$db.release === 'function') {
+        tx.$db.release();
+      }
     }
   }
 }

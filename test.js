@@ -476,3 +476,122 @@ it('should apply output transformations', async () => {
     new Set(['John', 'Paul', 'Ivan', 'Andrew', 'Mary']),
   );
 });
+
+it('should not consume expressions while building', () => {
+  const pg = new MockedPostgres();
+  const db = new Minusql.Postgres(pg);
+
+  // The same expression is routinely reused: a listing query and the COUNT(*)
+  // that paginates it share one condition.
+  const where = ['and',
+    ['=', Symbol('status'), 'active'],
+    ['>', Symbol('age'), { $: 18 }],
+  ];
+  const expected = `SELECT * FROM "users" WHERE (("status" = 'active') AND ("age" > $1))`;
+  assert.strictEqual(db.users.select(where).text, expected);
+  assert.strictEqual(db.users.select(where).text, expected);
+  // The operator names are still at the front of every level.
+  assert.strictEqual(where.length, 3);
+  assert.strictEqual(where[0], 'and');
+  assert.strictEqual(where[1][0], '=');
+  assert.strictEqual(where[2][0], '>');
+
+  const update = { visits: ['+', Symbol('visits'), 1] };
+  assert.strictEqual(
+    db.users.update(update, { id: 1 }).text,
+    `UPDATE "users" SET "visits"=("visits" + 1) WHERE "id"=1`,
+  );
+  assert.strictEqual(
+    db.users.update(update, { id: 2 }).text,
+    `UPDATE "users" SET "visits"=("visits" + 1) WHERE "id"=2`,
+  );
+});
+
+it('should construct CASE expressions', () => {
+  const pg = new MockedPostgres();
+  const db = new Minusql.Postgres(pg);
+
+  // Searched form: ['case', [when, then], …, [else]]
+  assert.strictEqual(
+    db.users.selectAll({ fields: {
+      adults: ['sum', ['case', [['>=', Symbol('age'), 18], 1], [0]]],
+    } }).text,
+    `SELECT SUM(CASE WHEN ("age" >= 18) THEN 1 ELSE 0 END) AS "adults" FROM "users"`,
+  );
+
+  // Simple form: a leading one-element branch is the subject.
+  assert.strictEqual(
+    db.users.selectAll({ fields: {
+      label: ['case', [Symbol('status')], [1, 'active'], [2, 'banned'], ['unknown']],
+    } }).text,
+    `SELECT CASE "status" WHEN 1 THEN 'active' WHEN 2 THEN 'banned' ELSE 'unknown' END AS "label" FROM "users"`,
+  );
+
+  assert.throws(() => db.users.selectAll({ fields: { x: ['case', 'oops'] } }).text);
+});
+
+it('should join against a subquery', () => {
+  const pg = new MockedPostgres();
+  const db = new Minusql.Postgres(pg);
+
+  const totals = db.orders.select(['>', Symbol('createdAt'), { $: '2026-01-01' }], {
+    fields: { userId: true, total: ['sum', Symbol('amount')] },
+    group: 'user_id',
+    having: ['>', ['sum', Symbol('amount')], 100],
+  });
+
+  // The subquery's own parameters keep their place in the numbering.
+  assert.deepEqual(
+    db.join([
+      { table: 'users' },
+      { table: totals, as: 't', join: 'INNER', on: { 't.userId': Symbol('users.id') } },
+    ]).select(['=', Symbol('users.city'), { $: 'Berlin' }], {
+      fields: { id: Symbol('users.id'), total: Symbol('t.total') },
+    }),
+    {
+      text: 'SELECT "users"."id" AS "id","t"."total" AS "total" FROM "users" INNER JOIN ' +
+        '(SELECT "user_id",SUM("amount") AS "total" FROM "orders" WHERE ("created_at" > $1) ' +
+        'GROUP BY user_id HAVING (SUM("amount") > 100)) AS "t" ON "t"."user_id"="users"."id" ' +
+        'WHERE ("users"."city" = $2)',
+      params: ['2026-01-01', 'Berlin'],
+    },
+  );
+});
+
+it('should parameterise tagged template queries per flavor', () => {
+  const pg = new Minusql.Postgres(new MockedPostgres());
+  const my = new Minusql.MySQL(new MockedMysql());
+
+  assert.deepEqual(
+    pg`SELECT * FROM "users" WHERE id = ${1} AND name = ${'John'}`,
+    { text: 'SELECT * FROM "users" WHERE id = $1 AND name = $2', params: [1, 'John'] },
+  );
+  assert.deepEqual(
+    my`SELECT * FROM \`users\` WHERE id = ${1} AND name = ${'John'}`,
+    { text: 'SELECT * FROM `users` WHERE id = ? AND name = ?', params: [1, 'John'] },
+  );
+
+  // Values blocks contribute parameters too, so anything after them has to be
+  // numbered from the parameter count rather than the interpolation index.
+  const rows = [{ a: 1, b: 2 }, { a: 3, b: 4 }];
+  assert.deepEqual(
+    pg`INSERT INTO "t" ${pg.values(rows)} RETURNING id > ${9}`,
+    {
+      text: 'INSERT INTO "t" ("a","b") VALUES ($1,$2),($3,$4) RETURNING id > $5',
+      params: [1, 2, 3, 4, 9],
+    },
+  );
+  assert.deepEqual(
+    my`INSERT INTO \`t\` ${my.values(rows)}`,
+    { text: 'INSERT INTO `t` (`a`,`b`) VALUES (?,?),(?,?)', params: [1, 2, 3, 4] },
+  );
+  // Column names convert like they do everywhere else in the builder.
+  assert.strictEqual(
+    pg`INSERT INTO "t" ${pg.values([{ userId: 1, createdAt: 'now' }])}`.text,
+    'INSERT INTO "t" ("user_id","created_at") VALUES ($1,$2)',
+  );
+  assert.strictEqual(
+    pg`INSERT INTO "t" ${pg.values([])}`.text,
+    'INSERT INTO "t" (SELECT NULL WHERE 1=0)',
+  );
+});
